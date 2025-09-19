@@ -89,15 +89,14 @@ def index_disease_registry(
 
     for doc in documents:
         disease_id = _slugify(doc.doc_title)
-        canonical_name = doc.doc_title
-
-        # Эмбеддинг создаем из названия + кодов МКБ
-        embed_text = f"{canonical_name} {' '.join(doc.mkb)}"
+        embed_text = doc.doc_title
         vector = embedder.encode_single(embed_text)
 
         payload = DiseaseRegistryPayload(
-            canonical_name=canonical_name,
-            icd10_codes=doc.mkb
+            canonical_name=doc.doc_title,
+            icd10_codes=doc.mkb,
+            disease_id=disease_id,  # NEW
+            canonical_name_lc=doc.doc_title.lower()  # NEW
         )
 
         vectors.append(vector)

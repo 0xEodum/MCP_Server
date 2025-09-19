@@ -78,17 +78,10 @@ class MedicalQdrantStore:
         return results
 
     def create_medical_indexes(self) -> None:
-        """Создание индексов для всех медицинских коллекций."""
-
-        # Registry индексы
-        for field in ["canonical_name", "icd10_codes"]:
+        for field in ["canonical_name", "icd10_codes", "disease_id", "canonical_name_lc"]:
             self._create_payload_index(DISEASE_REGISTRY, field)
-
-        # Overview индексы
         for field in ["disease_id", "canonical_name", "icd10_primary"]:
             self._create_payload_index(DISEASE_OVERVIEW, field)
-
-        # Sections индексы
         for field in ["disease_id", "section_id"]:
             self._create_payload_index(DISEASE_SECTIONS, field)
 
@@ -281,6 +274,15 @@ class MedicalQdrantStore:
             )
             return results
 
+    def search_diseases_by_name_exact(self, name_lc: str):
+        f = rest.Filter(must=[rest.FieldCondition(
+            key="canonical_name_lc", match=rest.MatchValue(value=name_lc)
+        )])
+        results, _ = self.client.scroll(
+            collection_name=DISEASE_REGISTRY,
+            scroll_filter=f, limit=20, with_payload=True
+        )
+        return results
     # ------------------------
     # Утилиты
     # ------------------------

@@ -15,10 +15,10 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class DiseaseRegistryPayload:
-    """Payload для коллекции disease_registry."""
-
     canonical_name: str
     icd10_codes: List[str] = field(default_factory=list)
+    disease_id: str = ""
+    canonical_name_lc: str = ""
 
 
 @dataclass
