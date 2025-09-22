@@ -40,7 +40,7 @@ except Exception:
 # --------------------
 # Configuration
 # --------------------
-DEFAULT_MODEL = "intfloat/multilingual-e5-large-instruct"
+DEFAULT_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 QDRANT_URL = "http://localhost:6333"
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
