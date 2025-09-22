@@ -56,7 +56,7 @@ def normalize_medical_query(
                     "disease_id": disease_id,
                     "canonical_name": result.payload.get("canonical_name"),
                     "icd10_codes": result.payload.get("icd10_codes", []),
-                    "score": 1.0,  # максимальный score для точного совпадения
+                    "score": 1.0,
                     "match_type": "icd_code"
                 })
 
