@@ -40,7 +40,7 @@ except Exception:
 # --------------------
 # Configuration
 # --------------------
-DEFAULT_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
+DEFAULT_MODEL = "intfloat/multilingual-e5-small"
 QDRANT_URL = "http://localhost:6333"
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
@@ -120,11 +120,14 @@ async def t_medical_normalize_query(
         query: str,
         top_k: int = 5,
         score_threshold: float = 0.6,
+        enable_reranking: bool = True,
+        rerank_top_k: int = 20,
 ) -> Dict[str, Any]:
-    """ЭТАП 1: Нормализация медицинского запроса.
+    """ЭТАП 1: Нормализация медицинского запроса с реранкингом.
 
     Преобразует пользовательский запрос в конкретные заболевания.
     Поддерживает поиск по названию, синонимам и кодам МКБ.
+    Включает реранкинг для повышения качества результатов.
     """
     store, emb = _ensure_medical_deps()
 
@@ -134,7 +137,9 @@ async def t_medical_normalize_query(
             emb,
             query,
             top_k=top_k,
-            score_threshold=score_threshold
+            score_threshold=score_threshold,
+            enable_reranking=enable_reranking,
+            rerank_top_k=rerank_top_k
         )
         result["tool"] = "medical_normalize_query"
         result["stage"] = "normalization"
@@ -223,8 +228,9 @@ async def t_medical_search_workflow(
         max_diseases: int = 3,
         include_sections: bool = False,
         section_query: Optional[str] = None,
+        enable_reranking: bool = True,
 ) -> Dict[str, Any]:
-    """ДЕМО: Полный медицинский workflow за один вызов.
+    """ДЕМО: Полный медицинский workflow за один вызов с реранкингом.
 
     В реальности LLM должен вызывать этапы поэтапно для проактивности.
     """
@@ -237,7 +243,8 @@ async def t_medical_search_workflow(
             user_query,
             max_diseases=max_diseases,
             include_sections=include_sections,
-            section_query=section_query
+            section_query=section_query,
+            enable_reranking=enable_reranking
         )
         result["tool"] = "medical_search_workflow"
         return result
@@ -284,12 +291,16 @@ def _register_fast() -> None:
             query: str,
             top_k: int = 5,
             score_threshold: float = 0.6,
+            enable_reranking: bool = True,
+            rerank_top_k: int = 20,
     ) -> dict:
-        """STAGE 1: Normalize user query to find specific diseases."""
+        """STAGE 1: Normalize user query to find specific diseases with reranking."""
         return await t_medical_normalize_query(
             query=query,
             top_k=top_k,
-            score_threshold=score_threshold
+            score_threshold=score_threshold,
+            enable_reranking=enable_reranking,
+            rerank_top_k=rerank_top_k
         )
 
     @mcp.tool()
@@ -326,13 +337,15 @@ def _register_fast() -> None:
             max_diseases: int = 3,
             include_sections: bool = False,
             section_query: Optional[str] = None,
+            enable_reranking: bool = True,
     ) -> dict:
-        """DEMO: Complete medical search workflow (all stages)."""
+        """DEMO: Complete medical search workflow with reranking (all stages)."""
         return await t_medical_search_workflow(
             user_query=user_query,
             max_diseases=max_diseases,
             include_sections=include_sections,
-            section_query=section_query
+            section_query=section_query,
+            enable_reranking=enable_reranking
         )
 
     mcp.run(transport="streamable-http")
@@ -353,9 +366,12 @@ if __name__ == "__main__":
     print(f"  - {DISEASE_SECTIONS} (disease sections)")
     print()
     print("Medical workflow:")
-    print("  1. medical_normalize_query - find diseases by user query")
+    print("  1. medical_normalize_query - find diseases by user query (with reranking)")
     print("  2. medical_get_overview - get disease info + available sections")
     print("  3. medical_get_sections - get specific sections content")
+    print()
+    print(f"Using model: {DEFAULT_MODEL}")
+    print(f"Vector size: Expected ~1024 (E5-Large)")
     print()
 
     if MCP_MODE == "fast":

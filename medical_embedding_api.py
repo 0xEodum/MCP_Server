@@ -5,14 +5,15 @@ medical_embedding_api.py — эмбеддинги для медицинской 
 - Оптимизация для медицинских терминов
 - Специализированная предобработка текста
 - Кэширование для частых запросов
+- Реранкинг с помощью cross-encoder для повышения качества
 """
 from __future__ import annotations
 
 import re
 import hashlib
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 
 
 class MedicalEmbedder:
@@ -20,12 +21,19 @@ class MedicalEmbedder:
 
     def __init__(
         self,
-        model_name: str = "paraphrase-multilingual-MiniLM-L12-v2",
+        model_name: str = "intfloat/multilingual-e5-large",
+        reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         normalize_embeddings: bool = True,
         cache_size: int = 1000
     ):
+        # Основная модель для эмбеддингов
         self.model = SentenceTransformer(model_name)
         self.normalize_embeddings = normalize_embeddings
+
+        # Модель для реранкинга
+        self.reranker = CrossEncoder(reranker_model)
+
+        # Кэш
         self.cache: Dict[str, List[float]] = {}
         self.cache_size = cache_size
 
@@ -48,6 +56,11 @@ class MedicalEmbedder:
 
         # Базовая предобработка
         processed_text = self.preprocess_text(text)
+
+        # Для E5 моделей добавляем префикс для query
+        if "e5" in self.model._modules['0'].auto_model.name_or_path.lower():
+            if not processed_text.startswith("query:"):
+                processed_text = f"query: {processed_text}"
 
         # Проверка кэша
         if use_cache:
@@ -75,7 +88,8 @@ class MedicalEmbedder:
         texts: List[str],
         batch_size: int = 64,
         show_progress: bool = False,
-        use_cache: bool = False  # Для батчей кэш обычно не эффективен
+        use_cache: bool = False,  # Для батчей кэш обычно не эффективен
+        add_prefix: bool = True
     ) -> np.ndarray:
         """Получение эмбеддингов для списка текстов."""
 
@@ -84,6 +98,11 @@ class MedicalEmbedder:
 
         # Предобработка всех текстов
         processed_texts = [self.preprocess_text(text) for text in texts]
+
+        # Для E5 моделей добавляем префиксы
+        if add_prefix and "e5" in self.model._modules['0'].auto_model.name_or_path.lower():
+            processed_texts = [f"passage: {text}" if not text.startswith(("query:", "passage:"))
+                             else text for text in processed_texts]
 
         # Получение эмбеддингов
         embeddings = self.model.encode(
@@ -95,6 +114,64 @@ class MedicalEmbedder:
         )
 
         return embeddings.astype(np.float32)
+
+    def rerank_results(
+        self,
+        query: str,
+        candidates: List[Dict],
+        text_field: str = "canonical_name",
+        top_k: Optional[int] = None
+    ) -> List[Dict]:
+        """
+        Реранкинг результатов с помощью cross-encoder.
+
+        Args:
+            query: Исходный запрос
+            candidates: Список кандидатов с полем text_field
+            text_field: Поле для сравнения с запросом
+            top_k: Количество результатов после реранкинга
+
+        Returns:
+            Отсортированный список кандидатов с обновленными scores
+        """
+        if not candidates:
+            return candidates
+
+        # Подготовка пар (query, candidate) для реранкера
+        pairs = []
+        for candidate in candidates:
+            candidate_text = candidate.get(text_field, "")
+            if candidate_text:
+                pairs.append([query, candidate_text])
+            else:
+                pairs.append([query, ""])
+
+        # Получение скоров от реранкера
+        if pairs:
+            rerank_scores = self.reranker.predict(pairs)
+
+            # Обновление скоров в результатах
+            reranked_candidates = []
+            for i, candidate in enumerate(candidates):
+                updated_candidate = candidate.copy()
+                updated_candidate['rerank_score'] = float(rerank_scores[i])
+                updated_candidate['original_score'] = candidate.get('score', 0.0)
+                reranked_candidates.append(updated_candidate)
+
+            # Сортировка по новому скору
+            reranked_candidates.sort(key=lambda x: x['rerank_score'], reverse=True)
+
+            # Обновление основного скора на реранк скор
+            for candidate in reranked_candidates:
+                candidate['score'] = candidate['rerank_score']
+
+            # Ограничение количества результатов
+            if top_k:
+                reranked_candidates = reranked_candidates[:top_k]
+
+            return reranked_candidates
+
+        return candidates
 
     def encode_medical_document(
         self,
@@ -110,7 +187,12 @@ class MedicalEmbedder:
         registry_text = title
         if include_icd_codes:
             registry_text += f" {' '.join(include_icd_codes)}"
-        results['registry'] = self.encode_single(registry_text)
+
+        # Добавляем префикс для E5 модели
+        if "e5" in self.model._modules['0'].auto_model.name_or_path.lower():
+            registry_text = f"passage: {registry_text}"
+
+        results['registry'] = self.encode_single(registry_text, use_cache=False)
 
         # Эмбеддинг для overview (название + краткое содержание)
         overview_parts = [title]
@@ -121,17 +203,33 @@ class MedicalEmbedder:
             overview_parts.append(section['body'][:200])  # Первые 200 символов
 
         overview_text = ' '.join(overview_parts)
-        results['overview'] = self.encode_single(overview_text)
+        if "e5" in self.model._modules['0'].auto_model.name_or_path.lower():
+            overview_text = f"passage: {overview_text}"
+
+        results['overview'] = self.encode_single(overview_text, use_cache=False)
 
         # Эмбеддинги для разделов
         results['sections'] = []
+        section_texts = []
+        section_metas = []
+
         for section in sections:
             if section.get('body', '').strip():
                 section_text = f"{section.get('title', '')} {section['body']}"
-                section_embedding = self.encode_single(section_text)
-                results['sections'].append({
+                section_texts.append(section_text)
+                section_metas.append({
                     'section_id': section.get('id', ''),
-                    'embedding': section_embedding
+                    'title': section.get('title', '')
+                })
+
+        # Батчевое кодирование секций
+        if section_texts:
+            section_embeddings = self.encode_batch(section_texts, add_prefix=True)
+
+            for i, embedding in enumerate(section_embeddings):
+                results['sections'].append({
+                    'section_id': section_metas[i]['section_id'],
+                    'embedding': embedding.tolist()
                 })
 
         return results

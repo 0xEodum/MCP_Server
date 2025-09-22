@@ -134,7 +134,7 @@ def main():
                         help='Пересоздать коллекции (удалит существующие данные)')
     parser.add_argument('--qdrant-url', default='http://localhost:6333',
                         help='URL Qdrant сервера')
-    parser.add_argument('--model', default='paraphrase-multilingual-MiniLM-L12-v2',
+    parser.add_argument('--model', default='intfloat/multilingual-e5-large',
                         help='Название модели для эмбеддингов')
     parser.add_argument('--dry-run', action='store_true',
                         help='Только анализ без индексации')

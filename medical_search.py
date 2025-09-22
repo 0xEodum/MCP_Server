@@ -2,7 +2,7 @@
 medical_search.py — поисковые функции для медицинской системы
 
 Реализует трехэтапный поиск по медицинским документам:
-1. Нормализация запроса через disease_registry
+1. Нормализация запроса через disease_registry (с реранкингом)
 2. Получение обзорной информации из disease_overview
 3. Извлечение конкретных разделов из disease_sections
 """
@@ -32,12 +32,15 @@ def normalize_medical_query(
     embedder: MedicalEmbedder,
     query: str,
     top_k: int = 5,
-    score_threshold: float = 0.6
+    score_threshold: float = 0.6,
+    enable_reranking: bool = True,
+    rerank_top_k: int = 20  # Берем больше результатов для реранкинга
 ) -> Dict[str, Any]:
     """Этап 1: Нормализация запроса пользователя.
 
     Ищет в disease_registry подходящие заболевания по запросу.
     Поддерживает поиск по названию, синонимам и кодам МКБ.
+    Включает реранкинг результатов для повышения качества.
     """
     start_time = time.time()
 
@@ -62,9 +65,13 @@ def normalize_medical_query(
 
     # Семантический поиск по эмбеддингам
     query_vector = embedder.encode_single(query)
+
+    # Увеличиваем количество кандидатов для реранкинга
+    search_limit = rerank_top_k if enable_reranking else top_k
+
     semantic_results = store.search_diseases_by_vector(
         query_vector,
-        top_k=top_k,
+        top_k=search_limit,
         score_threshold=score_threshold
     )
 
@@ -80,6 +87,17 @@ def normalize_medical_query(
                 "match_type": "semantic"
             })
 
+    # Применяем реранкинг к семантическим результатам
+    if enable_reranking and results_by_semantic:
+        print(f"Применяем реранкинг к {len(results_by_semantic)} кандидатам...")
+        reranked_results = embedder.rerank_results(
+            query=query,
+            candidates=results_by_semantic,
+            text_field="canonical_name",
+            top_k=top_k
+        )
+        results_by_semantic = reranked_results
+
     # Объединение результатов (приоритет МКБ кодам)
     all_results = results_by_icd + results_by_semantic
 
@@ -91,7 +109,7 @@ def normalize_medical_query(
             unique_results.append(result)
             seen_ids.add(result["disease_id"])
 
-    # Сортировка по score
+    # Сортировка по score (уже отсортированы после реранкинга)
     unique_results.sort(key=lambda x: x["score"], reverse=True)
 
     took_ms = int((time.time() - start_time) * 1000)
@@ -100,6 +118,8 @@ def normalize_medical_query(
         "found_diseases": unique_results[:top_k],
         "total_found": len(unique_results),
         "has_icd_matches": len(results_by_icd) > 0,
+        "reranking_applied": enable_reranking and len(results_by_semantic) > 0,
+        "search_candidates": len(results_by_semantic) if enable_reranking else 0,
         "took_ms": took_ms
     }
 
@@ -260,7 +280,8 @@ def medical_search_workflow(
     user_query: str,
     max_diseases: int = 3,
     include_sections: bool = False,
-    section_query: Optional[str] = None
+    section_query: Optional[str] = None,
+    enable_reranking: bool = True
 ) -> Dict[str, Any]:
     """Полный workflow медицинского поиска.
 
@@ -268,8 +289,14 @@ def medical_search_workflow(
     В реальности LLM должен вызывать этапы отдельно.
     """
 
-    # Этап 1: Нормализация
-    normalized = normalize_medical_query(store, embedder, user_query, top_k=max_diseases)
+    # Этап 1: Нормализация (с реранкингом)
+    normalized = normalize_medical_query(
+        store,
+        embedder,
+        user_query,
+        top_k=max_diseases,
+        enable_reranking=enable_reranking
+    )
 
     if not normalized["found_diseases"]:
         return {
