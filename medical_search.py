@@ -51,8 +51,9 @@ def normalize_medical_query(
 
         for result in icd_results:
             if result.payload:
+                disease_id = result.payload.get("disease_id") or result.id
                 results_by_icd.append({
-                    "disease_id": result.id,
+                    "disease_id": disease_id,
                     "canonical_name": result.payload.get("canonical_name"),
                     "icd10_codes": result.payload.get("icd10_codes", []),
                     "score": 1.0,  # максимальный score для точного совпадения
@@ -70,8 +71,9 @@ def normalize_medical_query(
     results_by_semantic = []
     for result in semantic_results:
         if result.payload:
+            disease_id = result.payload.get("disease_id") or result.id
             results_by_semantic.append({
-                "disease_id": result.id,
+                "disease_id": disease_id,
                 "canonical_name": result.payload.get("canonical_name"),
                 "icd10_codes": result.payload.get("icd10_codes", []),
                 "score": float(result.score),
