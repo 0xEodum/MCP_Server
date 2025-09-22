@@ -81,53 +81,16 @@ async def t_ping() -> Dict[str, Any]:
 # Medical Tools
 # --------------------
 
-async def t_medical_index_documents(
-        *,
-        json_files: List[str],
-        recreate_collections: bool = False,
-) -> Dict[str, Any]:
-    """Индексация медицинских JSON документов в 3 коллекции."""
-    store, emb = _ensure_medical_deps()
-
-    # Проверка файлов
-    valid_files = []
-    for file_path in json_files:
-        if not os.path.exists(file_path):
-            continue
-        valid_files.append(Path(file_path))
-
-    if not valid_files:
-        return {
-            "tool": "medical_index_documents",
-            "error": "Не найдено ни одного валидного файла",
-            "provided_files": json_files
-        }
-
-    try:
-        results = index_medical_documents(store, emb, valid_files, recreate_collections)
-        results["tool"] = "medical_index_documents"
-        return results
-    except Exception as e:
-        return {
-            "tool": "medical_index_documents",
-            "error": str(e),
-            "files_attempted": [str(f) for f in valid_files]
-        }
-
-
 async def t_medical_normalize_query(
         *,
         query: str,
         top_k: int = 5,
         score_threshold: float = 0.6,
         enable_reranking: bool = True,
-        rerank_top_k: int = 20,
+        rerank_top_k: int = 5,
 ) -> Dict[str, Any]:
-    """ЭТАП 1: Нормализация медицинского запроса с реранкингом.
-
-    Преобразует пользовательский запрос в конкретные заболевания.
-    Поддерживает поиск по названию, синонимам и кодам МКБ.
-    Включает реранкинг для повышения качества результатов.
+    """
+    ЭТАП 1: Нормализация медицинского запроса
     """
     store, emb = _ensure_medical_deps()
 
@@ -158,9 +121,8 @@ async def t_medical_get_overview(
         query: Optional[str] = None,
         top_k: int = 5,
 ) -> Dict[str, Any]:
-    """ЭТАП 2: Получение обзорной информации о заболеваниях.
-
-    Возвращает краткое описание и доступные разделы.
+    """
+    ЭТАП 2: Получение обзорной информации о заболеваниях
     """
     store, emb = _ensure_medical_deps()
 
@@ -191,13 +153,8 @@ async def t_medical_get_sections(
         query: Optional[str] = None,
         top_k: int = 10,
 ) -> Dict[str, Any]:
-    """ЭТАП 3: Получение конкретных разделов документа.
-
-    Args:
-        disease_id: ID заболевания (обязательно)
-        section_ids: ID разделов из JSON
-        query: семантический поиск по содержимому
-        top_k: максимум результатов
+    """
+    ЭТАП 3: Получение конкретных разделов медицинского документа
     """
     store, emb = _ensure_medical_deps()
 
@@ -222,42 +179,6 @@ async def t_medical_get_sections(
         }
 
 
-async def t_medical_search_workflow(
-        *,
-        user_query: str,
-        max_diseases: int = 3,
-        include_sections: bool = False,
-        section_query: Optional[str] = None,
-        enable_reranking: bool = True,
-) -> Dict[str, Any]:
-    """ДЕМО: Полный медицинский workflow за один вызов с реранкингом.
-
-    В реальности LLM должен вызывать этапы поэтапно для проактивности.
-    """
-    store, emb = _ensure_medical_deps()
-
-    try:
-        result = medical_search_workflow(
-            store,
-            emb,
-            user_query,
-            max_diseases=max_diseases,
-            include_sections=include_sections,
-            section_query=section_query,
-            enable_reranking=enable_reranking
-        )
-        result["tool"] = "medical_search_workflow"
-        return result
-    except Exception as e:
-        return {
-            "tool": "medical_search_workflow",
-            "error": str(e),
-            "query": user_query
-        }
-
-
-
-
 # --------------------
 # MCP Registration
 # --------------------
@@ -276,25 +197,39 @@ def _register_fast() -> None:
 
     # Medical tools (primary)
     @mcp.tool()
-    async def medical_index_documents(
-            json_files: List[str],
-            recreate_collections: bool = False,
-    ) -> dict:
-        """Index medical JSON documents into 3 Qdrant collections."""
-        return await t_medical_index_documents(
-            json_files=json_files,
-            recreate_collections=recreate_collections
-        )
-
-    @mcp.tool()
     async def medical_normalize_query(
             query: str,
             top_k: int = 5,
             score_threshold: float = 0.6,
             enable_reranking: bool = True,
-            rerank_top_k: int = 20,
+            rerank_top_k: int = 3,
     ) -> dict:
-        """STAGE 1: Normalize user query to find specific diseases with reranking."""
+        """
+        ЭТАП 1: Нормализация медицинского запроса
+
+        Преобразует пользовательский запрос в список конкретных заболеваний.
+        Это ПЕРВЫЙ инструмент, который нужно использовать для любого медицинского вопроса.
+
+        КОГДА ИСПОЛЬЗОВАТЬ:
+        - Пользователь спрашивает о симптомах, заболеваниях, лечении
+        - Нужно найти конкретные болезни по описанию
+        - Пользователь упомянул код МКБ-10
+        - Начало любого медицинского поиска
+
+        ПАРАМЕТРЫ:
+        - query: нормализованный запрос пользователя, наименование болезни (например: "перикардиты", "ретинобластома")
+        - top_k: сколько заболеваний найти (рекомендуется 3-5)
+        - score_threshold: минимальная релевантность (0.6 подходит для большинства случаев)
+        - enable_reranking: улучшает качество результатов (всегда используй True)
+        - rerank_top_k: должно быть меньше или равно top_k
+
+        ВОЗВРАЩАЕТ:
+        - found_diseases: список найденных заболеваний с disease_id и названиями
+        - has_icd_matches: найдены ли точные совпадения по МКБ-10
+        - reranking_applied: применялся ли реранкинг для улучшения результатов
+
+        💡 СОВЕТ: После получения списка заболеваний используй medical_get_overview для получения детальной информации.
+        """
         return await t_medical_normalize_query(
             query=query,
             top_k=top_k,
@@ -309,7 +244,32 @@ def _register_fast() -> None:
             query: Optional[str] = None,
             top_k: int = 5,
     ) -> dict:
-        """STAGE 2: Get disease overview with available sections."""
+        """
+        ЭТАП 2: Получение обзорной информации о заболеваниях
+
+        Возвращает краткое описание заболеваний и список доступных разделов документов.
+        Используй ПОСЛЕ medical_normalize_query для получения детальной информации.
+
+        КОГДА ИСПОЛЬЗОВАТЬ:
+        - Получил disease_ids от medical_normalize_query
+        - Нужна общая информация о заболевании
+        - Хочешь узнать, какие разделы доступны для изучения
+        - Нужно краткое описание перед углублением в детали
+
+        ПАРАМЕТРЫ:
+        - disease_ids: список ID заболеваний (из результата medical_normalize_query)
+        - query: дополнительный поисковый запрос для фильтрации (необязательно)
+        - top_k: максимальное количество результатов
+
+        ВОЗВРАЩАЕТ:
+        - found_diseases: список с краткими описаниями заболеваний
+        - available_sections: доступные разделы для каждого заболевания
+            * id: идентификатор раздела для medical_get_sections
+            * title: название раздела (например, "Симптомы", "Лечение")
+            * has_content: есть ли содержимое в разделе
+
+        СОВЕТ: Изучи available_sections и используй medical_get_sections для получения конкретной информации из интересующих разделов.
+        """
         return await t_medical_get_overview(
             disease_ids=disease_ids,
             query=query,
@@ -323,29 +283,48 @@ def _register_fast() -> None:
             query: Optional[str] = None,
             top_k: int = 10,
     ) -> dict:
-        """STAGE 3: Get specific document sections by IDs or semantic search."""
+        """
+        ЭТАП 3: Получение конкретных разделов медицинского документа
+        Возвращает подробную информацию из конкретных разделов документа о заболевании.
+        Это ФИНАЛЬНЫЙ этап для получения детальной медицинской информации.
+
+        КОГДА ИСПОЛЬЗОВАТЬ:
+        - Получил disease_id от medical_get_overview
+        - Нужна детальная информация из конкретных разделов
+        - Пользователь спрашивает о симптомах, лечении, диагностике конкретной болезни
+        - Хочешь получить полный текст из медицинских руководств
+
+        ПАРАМЕТРЫ:
+        - disease_id: ID заболевания (из medical_get_overview)
+        - section_ids: список ID разделов (из available_sections в overview)
+            * Примеры: ["symptoms", "treatment", "diagnosis", "complications"]
+            * Если не указать - получишь все доступные разделы
+        - query: семантический поиск внутри разделов (например: "побочные эффекты")
+        - top_k: максимальное количество разделов в ответе
+
+        ВОЗВРАЩАЕТ:
+        - disease_id: ID заболевания
+        - canonical_name: официальное название заболевания
+        - sections: список разделов с содержимым
+            * section_id: ID раздела
+            * section_title: название раздела
+            * content: полный текст раздела
+            * content_length: длина содержимого
+            * score: релевантность (если использовался query)
+
+        СТРАТЕГИИ ИСПОЛЬЗОВАНИЯ:
+        Получить все разделы:
+        medical_get_sections(disease_id="doc_abc123")
+        Получить конкретные разделы:
+        medical_get_sections(disease_id="doc_abc123", section_ids=["doc_terms", "doc_crat_info_1_1"])
+        Семантический поиск внутри заболевания:
+        medical_get_sections(disease_id="doc_abc123", query="анамнез")
+        """
         return await t_medical_get_sections(
             disease_id=disease_id,
             section_ids=section_ids,
             query=query,
             top_k=top_k
-        )
-
-    @mcp.tool()
-    async def medical_search_workflow(
-            user_query: str,
-            max_diseases: int = 3,
-            include_sections: bool = False,
-            section_query: Optional[str] = None,
-            enable_reranking: bool = True,
-    ) -> dict:
-        """DEMO: Complete medical search workflow with reranking (all stages)."""
-        return await t_medical_search_workflow(
-            user_query=user_query,
-            max_diseases=max_diseases,
-            include_sections=include_sections,
-            section_query=section_query,
-            enable_reranking=enable_reranking
         )
 
     mcp.run(transport="streamable-http")
