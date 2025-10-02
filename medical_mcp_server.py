@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import time
 import json
+import threading
+import asyncio
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, List, Optional
 from pathlib import Path
@@ -23,12 +25,12 @@ from medical_search import (
     medical_search_workflow,
 )
 
-
 # --- Lab Analysis ---
 from search_by_patterns.disease_search_engine import MedicalLabAnalyzer
 from pymongo import MongoClient
 
 from search_by_patterns.sync_manager import SyncManager
+
 SYNC_INTERVAL = int(os.getenv("SYNC_INTERVAL", "3600"))
 
 # --- MCP SDK ---
@@ -59,6 +61,31 @@ _medical_store: Optional[MedicalQdrantStore] = None
 _medical_embedder: Optional[MedicalEmbedder] = None
 _lab_analyzer: Optional[MedicalLabAnalyzer] = None
 _mongodb_client: Optional[MongoClient] = None
+_sync_manager: Optional[SyncManager] = None
+_sync_thread: Optional[threading.Thread] = None
+_sync_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _run_sync_manager_in_thread(sync_manager: SyncManager):
+    """
+    Запускает SyncManager в отдельном потоке с собственным event loop.
+    Эта функция будет работать в фоновом режиме.
+    """
+    global _sync_loop
+
+    # Создаём новый event loop для этого потока
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    _sync_loop = loop
+
+    try:
+        # Запускаем async метод start() в этом event loop
+        loop.run_until_complete(sync_manager.start())
+    except Exception as e:
+        print(f"❌ Sync manager error: {e}")
+    finally:
+        loop.close()
+
 
 def _ensure_medical_deps() -> tuple[MedicalQdrantStore, MedicalEmbedder]:
     """Инициализация медицинских компонентов."""
@@ -71,8 +98,9 @@ def _ensure_medical_deps() -> tuple[MedicalQdrantStore, MedicalEmbedder]:
 
 
 def _ensure_lab_analyzer() -> MedicalLabAnalyzer:
-    """Инициализация анализатора лабораторных тестов."""
-    global _lab_analyzer, _mongodb_client
+    """Инициализация анализатора лабораторных тестов с фоновой синхронизацией."""
+    global _lab_analyzer, _mongodb_client, _sync_manager, _sync_thread
+
     if _lab_analyzer is None:
         if _mongodb_client is None:
             _mongodb_client = MongoClient(MONGODB_URI)
@@ -84,8 +112,29 @@ def _ensure_lab_analyzer() -> MedicalLabAnalyzer:
         _lab_analyzer = MedicalLabAnalyzer(mongodb_client=_mongodb_client)
         _lab_analyzer.load_all_from_mongodb()
         print(f"✓ Lab analyzer initialized with MongoDB (db: {MONGODB_DB})")
-    return _lab_analyzer
 
+        # Запускаем фоновую синхронизацию
+        if _sync_manager is None and _sync_thread is None:
+            print(f"🔄 Starting background sync (interval: {SYNC_INTERVAL}s)...")
+
+            _sync_manager = SyncManager(
+                analyzer=_lab_analyzer,
+                mongodb_client=_mongodb_client,
+                db_name=MONGODB_DB,
+                check_interval=SYNC_INTERVAL
+            )
+
+            # Запускаем sync manager в отдельном daemon потоке
+            _sync_thread = threading.Thread(
+                target=_run_sync_manager_in_thread,
+                args=(_sync_manager,),
+                daemon=True,  # daemon=True означает, что поток завершится при выходе из программы
+                name="SyncManagerThread"
+            )
+            _sync_thread.start()
+            print("✓ Background sync thread started")
+
+    return _lab_analyzer
 
 
 def _pack(obj: Any) -> Any:
@@ -112,11 +161,11 @@ async def t_ping() -> Dict[str, Any]:
 # --------------------
 
 async def t_analyze_lab_tests(
-    *,
-    tests: List[Dict[str, str]],
-    gender: str = "unisex",
-    top_k: int = 10,
-    categories: Optional[List[str]] = None
+        *,
+        tests: List[Dict[str, str]],
+        gender: str = "unisex",
+        top_k: int = 10,
+        categories: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Анализ лабораторных тестов для определения возможных заболеваний
@@ -267,6 +316,60 @@ async def t_medical_get_sections(
             "tool": "medical_get_sections",
             "error": str(e),
             "disease_id": disease_id
+        }
+
+
+# --------------------
+# Sync Management Tools
+# --------------------
+
+async def t_get_sync_status() -> Dict[str, Any]:
+    """
+    Получение статуса синхронизации с MongoDB
+    """
+    global _sync_manager
+
+    if _sync_manager is None:
+        return {
+            "enabled": False,
+            "message": "Sync manager not initialized"
+        }
+
+    try:
+        status = _sync_manager.get_status()
+        return {
+            "enabled": True,
+            "status": status
+        }
+    except Exception as e:
+        return {
+            "enabled": True,
+            "error": str(e)
+        }
+
+
+async def t_force_sync() -> Dict[str, Any]:
+    """
+    Принудительная синхронизация данных из MongoDB
+    """
+    global _sync_manager
+
+    if _sync_manager is None:
+        return {
+            "success": False,
+            "error": "Sync manager not initialized"
+        }
+
+    try:
+        result = _sync_manager.force_sync()
+        return {
+            "success": True,
+            **result
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
         }
 
 
@@ -495,12 +598,19 @@ if __name__ == "__main__":
     print(f"  - {DISEASE_SECTIONS} (disease sections)")
     print()
     print("Lab Analysis Configuration:")
+    print(f"  - MongoDB URI: {MONGODB_URI}")
+    print(f"  - Database: {MONGODB_DB}")
+    print(f"  - Sync interval: {SYNC_INTERVAL}s")
     print()
     print("Medical workflow:")
     print("  1. medical_normalize_query - find diseases by user query (with reranking)")
     print("  2. medical_get_overview - get disease info + available sections")
     print("  3. medical_get_sections - get specific sections content")
     print("  4. analyze_lab_tests - analyze laboratory test results")
+    print()
+    print("Sync management:")
+    print("  5. get_sync_status - check synchronization status")
+    print("  6. force_sync - force immediate data sync from MongoDB")
     print()
     print(f"Using model: {DEFAULT_MODEL}")
     print(f"Vector size: Expected ~1024 (E5-Large)")
