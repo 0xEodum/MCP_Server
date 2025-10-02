@@ -23,6 +23,14 @@ from medical_search import (
     medical_search_workflow,
 )
 
+
+# --- Lab Analysis ---
+from search_by_patterns.disease_search_engine import MedicalLabAnalyzer
+from pymongo import MongoClient
+
+from search_by_patterns.sync_manager import SyncManager
+SYNC_INTERVAL = int(os.getenv("SYNC_INTERVAL", "3600"))
+
 # --- MCP SDK ---
 MCP_MODE = None
 try:
@@ -44,8 +52,13 @@ DEFAULT_MODEL = "intfloat/multilingual-e5-small"
 QDRANT_URL = "http://localhost:6333"
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+MONGODB_DB = os.getenv("MONGODB_DB", "medical_lab")
+
 _medical_store: Optional[MedicalQdrantStore] = None
 _medical_embedder: Optional[MedicalEmbedder] = None
+_lab_analyzer: Optional[MedicalLabAnalyzer] = None
+_mongodb_client: Optional[MongoClient] = None
 
 def _ensure_medical_deps() -> tuple[MedicalQdrantStore, MedicalEmbedder]:
     """Инициализация медицинских компонентов."""
@@ -55,6 +68,23 @@ def _ensure_medical_deps() -> tuple[MedicalQdrantStore, MedicalEmbedder]:
     if _medical_embedder is None:
         _medical_embedder = MedicalEmbedder(DEFAULT_MODEL)
     return _medical_store, _medical_embedder
+
+
+def _ensure_lab_analyzer() -> MedicalLabAnalyzer:
+    """Инициализация анализатора лабораторных тестов."""
+    global _lab_analyzer, _mongodb_client
+    if _lab_analyzer is None:
+        if _mongodb_client is None:
+            _mongodb_client = MongoClient(MONGODB_URI)
+            # Проверка подключения
+            _mongodb_client.admin.command('ping')
+            print("✓ Connected to MongoDB for lab analysis")
+
+        # Создаём анализатор с MongoDB клиентом
+        _lab_analyzer = MedicalLabAnalyzer(mongodb_client=_mongodb_client)
+        _lab_analyzer.load_all_from_mongodb()
+        print(f"✓ Lab analyzer initialized with MongoDB (db: {MONGODB_DB})")
+    return _lab_analyzer
 
 
 
@@ -75,6 +105,67 @@ def _pack(obj: Any) -> Any:
 async def t_ping() -> Dict[str, Any]:
     s, _ = _ensure_medical_deps()
     return {"ok": s.ping(), "ts": int(time.time())}
+
+
+# --------------------
+# Lab Analysis Tools
+# --------------------
+
+async def t_analyze_lab_tests(
+    *,
+    tests: List[Dict[str, str]],
+    gender: str = "unisex",
+    top_k: int = 10,
+    categories: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """
+    Анализ лабораторных тестов для определения возможных заболеваний
+    """
+    analyzer = _ensure_lab_analyzer()
+
+    try:
+        start_time = time.time()
+
+        results = analyzer.analyze_patient(
+            tests=tests,
+            gender=gender,
+            top_k=top_k,
+            categories=categories
+        )
+
+        processing_time = (time.time() - start_time) * 1000
+
+        disease_results = []
+        for r in results:
+            disease_results.append({
+                "disease_id": r.disease_id,
+                "canonical_name": r.canonical_name,
+                "matched_patterns": r.matched_patterns,
+                "total_patterns": r.total_patterns,
+                "matched_score": r.matched_score,
+                "contradiction_penalty": r.contradiction_penalty,
+                "total_score": r.total_score,
+                "max_possible_score": r.max_possible_score,
+                "normalized_score": r.normalized_score,
+                "matched_details": r.matched_details,
+                "contradictions": r.contradictions,
+                "missing_data": r.missing_data
+            })
+
+        return {
+            "success": True,
+            "processing_time_ms": processing_time,
+            "results": disease_results,
+            "total_found": len(disease_results),
+            "tool": "analyze_lab_tests"
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "tool": "analyze_lab_tests"
+        }
 
 
 # --------------------
@@ -214,7 +305,7 @@ def _register_fast() -> None:
         - Пользователь спрашивает о симптомах, заболеваниях, лечении
         - Нужно найти конкретные болезни по описанию
         - Пользователь упомянул код МКБ-10
-        - Начало любого медицинского поиска
+        - Начало медицинского поиска новой темы
 
         ПАРАМЕТРЫ:
         - query: нормализованный запрос пользователя, наименование болезни (например: "перикардиты", "ретинобластома")
@@ -228,7 +319,8 @@ def _register_fast() -> None:
         - has_icd_matches: найдены ли точные совпадения по МКБ-10
         - reranking_applied: применялся ли реранкинг для улучшения результатов
 
-        💡 СОВЕТ: После получения списка заболеваний используй medical_get_overview для получения детальной информации.
+        СОВЕТ: После получения списка заболеваний используй medical_get_overview для получения детальной информации.
+        ПРАВИЛО: НЕ ИСПОЛЬЗУЙ ДЛЯ ПОИСКА ИНФОРМАЦИИ ПО УЖЕ ИЗВЕСТНОМУ ДОКУМЕНТУ (например симптомы некоторой болезни, которую ты уже нашел ранее). Для такого поиска используй medical_get_sections
         """
         return await t_medical_normalize_query(
             query=query,
@@ -248,13 +340,12 @@ def _register_fast() -> None:
         ЭТАП 2: Получение обзорной информации о заболеваниях
 
         Возвращает краткое описание заболеваний и список доступных разделов документов.
-        Используй ПОСЛЕ medical_normalize_query для получения детальной информации.
+        Используй ПОСЛЕ medical_normalize_query для получения оглавления.
 
         КОГДА ИСПОЛЬЗОВАТЬ:
         - Получил disease_ids от medical_normalize_query
         - Нужна общая информация о заболевании
         - Хочешь узнать, какие разделы доступны для изучения
-        - Нужно краткое описание перед углублением в детали
 
         ПАРАМЕТРЫ:
         - disease_ids: список ID заболеваний (из результата medical_normalize_query)
@@ -327,6 +418,65 @@ def _register_fast() -> None:
             top_k=top_k
         )
 
+    @mcp.tool()
+    async def analyze_lab_tests(
+            tests: List[Dict[str, str]],
+            gender: str = "unisex",
+            top_k: int = 10,
+            categories: Optional[List[str]] = None
+    ) -> dict:
+        """
+        Анализ лабораторных тестов для определения возможных заболеваний
+
+        Анализирует результаты лабораторных анализов и возвращает список возможных заболеваний
+        с оценкой вероятности на основе паттернов отклонений.
+
+        КОГДА ИСПОЛЬЗОВАТЬ:
+        - У пациента есть результаты лабораторных анализов
+        - Нужно определить возможные заболевания по отклонениям в анализах
+        - Требуется дифференциальная диагностика на основе лабораторных данных
+
+        ПАРАМЕТРЫ:
+        - tests: список лабораторных тестов, каждый содержит:
+            * name: название теста (например: "Гемоглобин", "Лейкоциты")
+            * value: значение теста (например: "120", "8.5")
+            * units: единицы измерения (например: "г/л", "×10^9/л")
+        - gender: пол пациента ("male", "female", "unisex") для учета норм
+        - top_k: максимальное количество заболеваний в результате (по умолчанию 10)
+        - categories: фильтр по категориям заболеваний (необязательно)
+
+        ВОЗВРАЩАЕТ:
+        - success: успешность анализа
+        - processing_time_ms: время обработки в миллисекундах
+        - results: список найденных заболеваний с оценками:
+            * disease_id: идентификатор заболевания
+            * canonical_name: официальное название заболевания
+            * matched_patterns: количество совпавших паттернов
+            * total_patterns: общее количество паттернов для заболевания
+            * matched_score: балл за совпадения
+            * contradiction_penalty: штраф за противоречия
+            * total_score: итоговый балл
+            * normalized_score: нормализованный балл (0-1)
+            * matched_details: детали совпадений
+            * contradictions: список противоречий
+            * missing_data: недостающие данные
+        - total_found: общее количество найденных заболеваний
+
+        ПРИМЕР ИСПОЛЬЗОВАНИЯ:
+        tests = [
+            {"name": "Гемоглобин", "value": "85", "units": "г/л"},
+            {"name": "Лейкоциты", "value": "12.5", "units": "×10^9/л"},
+            {"name": "СОЭ", "value": "45", "units": "мм/ч"}
+        ]
+        analyze_lab_tests(tests=tests, gender="female", top_k=5)
+        """
+        return await t_analyze_lab_tests(
+            tests=tests,
+            gender=gender,
+            top_k=top_k,
+            categories=categories
+        )
+
     mcp.run(transport="streamable-http")
 
 
@@ -344,10 +494,13 @@ if __name__ == "__main__":
     print(f"  - {DISEASE_OVERVIEW} (disease overview)")
     print(f"  - {DISEASE_SECTIONS} (disease sections)")
     print()
+    print("Lab Analysis Configuration:")
+    print()
     print("Medical workflow:")
     print("  1. medical_normalize_query - find diseases by user query (with reranking)")
     print("  2. medical_get_overview - get disease info + available sections")
     print("  3. medical_get_sections - get specific sections content")
+    print("  4. analyze_lab_tests - analyze laboratory test results")
     print()
     print(f"Using model: {DEFAULT_MODEL}")
     print(f"Vector size: Expected ~1024 (E5-Large)")
