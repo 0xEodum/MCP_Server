@@ -6,10 +6,11 @@ Medical Lab Disease Search Engine
 import json
 import math
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
 from collections import defaultdict
 from pathlib import Path
 import re
+
+from search_by_patterns.models import TestResult, Pattern, Disease, SearchResult
 
 
 class UnitConverter:
@@ -125,104 +126,56 @@ class UnitConverter:
 
         return value
 
-@dataclass
-class TestResult:
-    """Результат лабораторного теста"""
-    name: str
-    value: float
-    units: str
-    status: Optional[str] = None
-    category: Optional[str] = None
-
-
-@dataclass
-class Pattern:
-    """Паттерн отклонения для заболевания"""
-    test_name: str
-    expected_status: str
-    category: str
-    idf_weight: float = 1.0
-
-
-@dataclass
-class Disease:
-    """Заболевание с паттернами"""
-    disease_id: str
-    canonical_name: str
-    patterns: List[Pattern] = field(default_factory=list)
-    max_idf_score: float = 0.0
-    
-    def calculate_max_score(self):
-        """Расчёт максимального возможного скора"""
-        self.max_idf_score = sum(p.idf_weight for p in self.patterns)
-
-
-@dataclass
-class SearchResult:
-    """Результат поиска заболевания"""
-    disease_id: str
-    canonical_name: str
-    matched_patterns: int
-    total_patterns: int
-    matched_score: float
-    contradiction_penalty: float
-    total_score: float
-    max_possible_score: float
-    normalized_score: float
-    matched_details: List[Dict]
-    contradictions: List[Dict]
-    missing_data: List[Dict]
-
 
 class ReferenceRangeManager:
     """Управление референсными диапазонами"""
-    
+
     def __init__(self):
         self.references: Dict[str, Dict] = {}
         # Индекс: normalized_name -> (category, original_name)
         self.name_index: Dict[str, Tuple[str, str]] = {}
         self.unit_converter = UnitConverter()
-    
+
     def load_from_json(self, json_path: str):
         """Загрузка референсов из JSON"""
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        
+
         ref_ranges = data.get('reference_ranges', {})
-        
+
         for category, tests in ref_ranges.items():
             if category not in self.references:
                 self.references[category] = {}
-            
+
             for test in tests:
                 test_name = test['test_name']
                 self.references[category][test_name] = test
-                
+
                 # Индексируем основное имя
                 norm_name = self._normalize(test_name)
                 self.name_index[norm_name] = (category, test_name)
-                
+
                 # Индексируем альтернативные имена
                 for alt_name in test.get('alt_names', []):
                     norm_alt = self._normalize(alt_name)
                     self.name_index[norm_alt] = (category, test_name)
-        
+
         print(f"✓ Loaded {sum(len(tests) for tests in self.references.values())} reference ranges")
         print(f"✓ Built name index with {len(self.name_index)} entries")
-    
+
     def find_test(self, test_name: str) -> Optional[Tuple[str, Dict]]:
         """
         Поиск теста по имени (включая альтернативные названия)
         Возвращает: (category, test_data) или None
         """
         norm_name = self._normalize(test_name)
-        
+
         if norm_name in self.name_index:
             category, original_name = self.name_index[norm_name]
             return category, self.references[category][original_name]
-        
+
         return None
-    
+
     def calculate_status(
         self,
         test_name: str,
@@ -237,12 +190,12 @@ class ReferenceRangeManager:
         test_info = self.find_test(test_name)
         if not test_info:
             return 'unknown'
-        
+
         _, test_data = test_info
         # Convert patient measurement to reference units when possible
         target_units = test_data.get('units')
         value = self.unit_converter.convert(value, units, target_units)
-        
+
         # ПРИОРИТЕТ 1: Абсолютные диапазоны статусов
         status_ranges = test_data.get('status_ranges', {})
         if status_ranges:
@@ -254,41 +207,41 @@ class ReferenceRangeManager:
             else:
                 # Берём первый доступный
                 ranges = next(iter(status_ranges.values()))
-            
+
             # Проверяем критически низкий
             if 'critically_low' in ranges:
                 if 'max' in ranges['critically_low'] and value <= ranges['critically_low']['max']:
                     return 'critically_low'
-            
+
             # Проверяем ниже нормы
             if 'below_normal' in ranges:
                 rng = ranges['below_normal']
                 if 'min' in rng and 'max' in rng:
                     if rng['min'] <= value < rng['max']:
                         return 'below_normal'
-            
+
             # Проверяем норму
             if 'normal' in ranges:
                 rng = ranges['normal']
                 if 'min' in rng and 'max' in rng:
                     if rng['min'] <= value <= rng['max']:
                         return 'normal'
-            
+
             # Проверяем выше нормы
             if 'above_normal' in ranges:
                 rng = ranges['above_normal']
                 if 'min' in rng and 'max' in rng:
                     if rng['min'] < value <= rng['max']:
                         return 'above_normal'
-            
+
             # Проверяем критически высокий
             if 'critically_high' in ranges:
                 if 'min' in ranges['critically_high'] and value >= ranges['critically_high']['min']:
                     return 'critically_high'
-        
+
         # ПРИОРИТЕТ 2: Процентные пороги от нормального диапазона
         normal_range = test_data.get('normal_range', {})
-        
+
         # Определяем диапазон по полу
         if isinstance(normal_range, dict):
             if gender in normal_range:
@@ -301,46 +254,46 @@ class ReferenceRangeManager:
                 range_data = next(iter(normal_range.values()), {})
         else:
             return 'unknown'
-        
+
         min_val = range_data.get('min')
         max_val = range_data.get('max')
-        
+
         if min_val is None or max_val is None:
             return 'unknown'
-        
+
         # Пороги отклонений
         thresholds = test_data.get('deviation_thresholds', {})
         mild_pct = thresholds.get('mild_deviation_pct', 10)
         significant_pct = thresholds.get('significant_deviation_pct', 30)
-        
+
         # Проверка нормы
         if min_val <= value <= max_val:
             return 'normal'
-        
+
         # Ниже нормы
         if value < min_val:
             deviation_pct = ((min_val - value) / min_val) * 100
-            
+
             if deviation_pct <= mild_pct:
                 return 'normal'
             elif deviation_pct <= significant_pct:
                 return 'below_normal'
             else:
                 return 'critically_low'
-        
+
         # Выше нормы
         if value > max_val:
             deviation_pct = ((value - max_val) / max_val) * 100
-            
+
             if deviation_pct <= mild_pct:
                 return 'normal'
             elif deviation_pct <= significant_pct:
                 return 'above_normal'
             else:
                 return 'critically_high'
-        
+
         return 'unknown'
-    
+
     @staticmethod
     def _normalize(name: str) -> str:
         """Нормализация названия теста"""
@@ -353,7 +306,7 @@ class ReferenceRangeManager:
 
 class IDFCalculator:
     """Расчёт IDF весов для паттернов"""
-    
+
     @staticmethod
     def calculate_idf_weights(diseases: List[Disease]) -> None:
         """
@@ -361,13 +314,13 @@ class IDFCalculator:
         Изменяет объекты Disease in-place
         """
         total_diseases = len(diseases)
-        
+
         if total_diseases == 0:
             return
-        
+
         # Подсчёт document frequency для каждого паттерна
         pattern_df: Dict[str, int] = defaultdict(int)
-        
+
         for disease in diseases:
             # Уникальные паттерны в заболевании
             unique_patterns = set()
@@ -377,11 +330,11 @@ class IDFCalculator:
                     pattern.expected_status
                 )
                 unique_patterns.add(pattern_key)
-            
+
             # Увеличиваем DF для каждого уникального паттерна
             for pattern_key in unique_patterns:
                 pattern_df[pattern_key] += 1
-        
+
         # Расчёт IDF для каждого паттерна
         for disease in diseases:
             for pattern in disease.patterns:
@@ -390,20 +343,20 @@ class IDFCalculator:
                     pattern.expected_status
                 )
                 df = pattern_df[pattern_key]
-                
+
                 # IDF = ln((N + 1) / (DF + 1))
                 pattern.idf_weight = math.log((total_diseases + 1) / (df + 1))
-            
+
             # Пересчитываем максимальный скор
             disease.calculate_max_score()
-        
+
         print(f"✓ Calculated IDF weights for {len(pattern_df)} unique patterns")
         print(f"  Total diseases: {total_diseases}")
         avg_idf = sum(
             p.idf_weight for d in diseases for p in d.patterns
         ) / sum(len(d.patterns) for d in diseases)
         print(f"  Average IDF weight: {avg_idf:.4f}")
-    
+
     @staticmethod
     def _make_pattern_key(test_name: str, status: str) -> str:
         """Создание ключа паттерна"""
@@ -416,32 +369,32 @@ class DiseaseSearchEngine:
     Поисковый движок для определения заболеваний
     Работает полностью in-memory с инвертированным индексом
     """
-    
+
     def __init__(self, reference_manager: ReferenceRangeManager):
         self.reference_manager = reference_manager
         self.diseases: Dict[str, Disease] = {}
-        
+
         # Инвертированный индекс: pattern_key -> [(disease_id, idf_weight, category)]
         self.pattern_index: Dict[str, List[Tuple[str, float, str]]] = defaultdict(list)
-        
+
         # Индекс по категориям: category -> [disease_ids]
         self.category_index: Dict[str, set] = defaultdict(set)
-    
+
     def load_diseases_from_json(self, json_path: str):
         """Загрузка заболеваний из JSON"""
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        
+
         diseases_data = data.get('diseases', [])
         diseases_list = []
-        
+
         for disease_data in diseases_data:
             disease = Disease(
                 disease_id=disease_data['disease_id'],
                 canonical_name=disease_data['canonical_name'],
                 patterns=[]
             )
-            
+
             # Загружаем паттерны по категориям
             pattern_groups = disease_data.get('pattern_groups', {})
             for category, patterns in pattern_groups.items():
@@ -452,19 +405,19 @@ class DiseaseSearchEngine:
                         category=category
                     )
                     disease.patterns.append(pattern)
-            
+
             diseases_list.append(disease)
-        
+
         # Расчёт IDF весов
         IDFCalculator.calculate_idf_weights(diseases_list)
-        
+
         # Сохраняем в словарь и строим индексы
         for disease in diseases_list:
             self.diseases[disease.disease_id] = disease
             self._index_disease(disease)
-        
+
         print(f"✓ Loaded {len(self.diseases)} diseases into search engine")
-    
+
     def _index_disease(self, disease: Disease):
         """Построение индексов для заболевания"""
         for pattern in disease.patterns:
@@ -475,20 +428,20 @@ class DiseaseSearchEngine:
                 canonical_name = test_data['test_name']
             else:
                 canonical_name = pattern.test_name
-            
+
             pattern_key = self._make_pattern_key(
                 canonical_name,
                 pattern.expected_status
             )
-            
+
             self.pattern_index[pattern_key].append((
                 disease.disease_id,
                 pattern.idf_weight,
                 pattern.category
             ))
-            
+
             self.category_index[pattern.category].add(disease.disease_id)
-    
+
     def search(
         self,
         patient_tests: List[TestResult],
@@ -500,7 +453,7 @@ class DiseaseSearchEngine:
     ) -> List[SearchResult]:
         """
         Поиск заболеваний по результатам анализов пациента
-        
+
         Args:
             patient_tests: Список результатов анализов
             top_k: Количество результатов
@@ -508,13 +461,13 @@ class DiseaseSearchEngine:
             categories: Фильтр по категориям (None = все категории)
             min_matched_patterns: Минимум совпадений для включения в результаты
             apply_contradiction_penalty: Применять ли штраф за противоречия
-        
+
         Returns:
             Список результатов, отсортированный по релевантности
         """
         # 1. Определяем статусы для всех тестов пациента
         patient_patterns: Dict[str, Tuple[str, str, str]] = {}  # normalized_name -> (status, category, canonical_name)
-        
+
         for test in patient_tests:
             status = self.reference_manager.calculate_status(
                 test.name,
@@ -522,10 +475,10 @@ class DiseaseSearchEngine:
                 gender,
                 test.units
             )
-            
+
             if status == 'unknown':
                 continue
-            
+
             # Находим категорию теста и каноническое название
             test_info = self.reference_manager.find_test(test.name)
             if test_info:
@@ -534,15 +487,15 @@ class DiseaseSearchEngine:
             else:
                 category = 'unknown'
                 canonical_name = test.name
-            
+
             normalized_name = self._normalize(canonical_name)
             patient_patterns[normalized_name] = (status, category, canonical_name)
             test.status = status
             test.category = category
-        
+
         if not patient_patterns:
             return []
-        
+
         # 2. Собираем релевантные заболевания через инвертированный индекс
         disease_scores: Dict[str, Dict] = defaultdict(lambda: {
             'matched_score': 0.0,
@@ -551,22 +504,22 @@ class DiseaseSearchEngine:
             'contradictions': [],
             'missing_data': []
         })
-        
+
         # Проходим по паттернам пациента
         for test_name, (status, category, canonical_name) in patient_patterns.items():
             # Фильтр по категориям
             if categories and category not in categories:
                 continue
-            
+
             pattern_key = self._make_pattern_key(canonical_name, status)
-            
+
             # Находим все заболевания с этим паттерном (O(1) lookup!)
             if pattern_key in self.pattern_index:
                 for disease_id, idf_weight, pattern_category in self.pattern_index[pattern_key]:
                     # Фильтр по категориям заболевания
                     if categories and pattern_category not in categories:
                         continue
-                    
+
                     # Это совпадение!
                     disease_scores[disease_id]['matched_score'] += idf_weight
                     disease_scores[disease_id]['matched_patterns'].append({
@@ -575,11 +528,11 @@ class DiseaseSearchEngine:
                         'idf_weight': idf_weight,
                         'category': pattern_category
                     })
-        
+
         # 3. Проверяем противоречия (только для найденных заболеваний)
         for disease_id in disease_scores.keys():
             disease = self.diseases[disease_id]
-            
+
             for pattern in disease.patterns:
                 # Находим каноническое название
                 test_info = self.reference_manager.find_test(pattern.test_name)
@@ -588,19 +541,19 @@ class DiseaseSearchEngine:
                     canonical_name = test_data['test_name']
                 else:
                     canonical_name = pattern.test_name
-                
+
                 normalized_test = self._normalize(canonical_name)
-                
+
                 # Есть ли этот тест у пациента?
                 if normalized_test in patient_patterns:
                     patient_status, _, _ = patient_patterns[normalized_test]
                     expected_status = pattern.expected_status
-                    
+
                     # Противоречие?
                     if patient_status != expected_status:
                         if apply_contradiction_penalty:
                             disease_scores[disease_id]['contradiction_penalty'] += pattern.idf_weight
-                        
+
                         disease_scores[disease_id]['contradictions'].append({
                             'test_name': pattern.test_name,
                             'expected': expected_status,
@@ -617,21 +570,21 @@ class DiseaseSearchEngine:
                         'idf_weight': pattern.idf_weight,
                         'category': pattern.category
                     })
-        
+
         # 4. Финальный скоринг и формирование результатов
         results = []
-        
+
         for disease_id, scores in disease_scores.items():
             if len(scores['matched_patterns']) < min_matched_patterns:
                 continue
-            
+
             disease = self.diseases[disease_id]
-            
+
             matched_score = scores['matched_score']
             contradiction_penalty = scores['contradiction_penalty']
             total_score = matched_score - contradiction_penalty
             max_score = disease.max_idf_score
-            
+
             result = SearchResult(
                 disease_id=disease_id,
                 canonical_name=disease.canonical_name,
@@ -646,22 +599,22 @@ class DiseaseSearchEngine:
                 contradictions=scores['contradictions'],
                 missing_data=scores['missing_data']
             )
-            
+
             results.append(result)
-        
+
         # 5. Сортировка по релевантности
         results.sort(
             key=lambda x: (x.total_score, x.normalized_score, x.matched_patterns),
             reverse=True
         )
-        
+
         return results[:top_k]
-    
+
     def _make_pattern_key(self, test_name: str, status: str) -> str:
         """Создание ключа паттерна"""
         normalized = self._normalize(test_name)
         return f"{normalized}:{status}"
-    
+
     @staticmethod
     def _normalize(name: str) -> str:
         """Нормализация названия теста"""
@@ -674,7 +627,7 @@ class MedicalLabAnalyzer:
     Объединяет все компоненты системы
     Поддерживает загрузку как из JSON файлов, так и из MongoDB
     """
-    
+
     def __init__(self, mongodb_client=None):
         """
         Args:
@@ -684,17 +637,17 @@ class MedicalLabAnalyzer:
         self.search_engine = None
         self.mongodb_client = mongodb_client
         self.mongodb_db = None
-        
+
         if mongodb_client:
             self.mongodb_db = mongodb_client.medical_lab
-    
+
     def load_references(self, references_path: str):
         """Загрузка референсных диапазонов"""
         print("=" * 60)
         print("Loading reference ranges...")
         self.reference_manager.load_from_json(references_path)
         print("=" * 60)
-    
+
     def load_diseases(self, diseases_path: str):
         """Загрузка базы заболеваний"""
         print("=" * 60)
@@ -702,7 +655,7 @@ class MedicalLabAnalyzer:
         self.search_engine = DiseaseSearchEngine(self.reference_manager)
         self.search_engine.load_diseases_from_json(diseases_path)
         print("=" * 60)
-    
+
     def analyze_patient(
         self,
         tests: List[Dict],
@@ -712,7 +665,7 @@ class MedicalLabAnalyzer:
     ) -> List[SearchResult]:
         """
         Анализ результатов пациента
-        
+
         Args:
             tests: Список тестов вида [{"name": "...", "value": "...", "units": "..."}]
             gender: Пол пациента
@@ -721,7 +674,7 @@ class MedicalLabAnalyzer:
         """
         if not self.search_engine:
             raise ValueError("Disease database not loaded. Call load_diseases() first.")
-        
+
         # Преобразуем входные данные в TestResult
         test_results = []
         for test in tests:
@@ -736,7 +689,7 @@ class MedicalLabAnalyzer:
             except (ValueError, KeyError) as e:
                 print(f"Warning: Skipping invalid test: {test}. Error: {e}")
                 continue
-        
+
         # Поиск заболеваний
         results = self.search_engine.search(
             patient_tests=test_results,
@@ -744,19 +697,19 @@ class MedicalLabAnalyzer:
             gender=gender,
             categories=categories
         )
-        
+
         return results
-    
+
     def print_results(self, results: List[SearchResult], detailed: bool = False):
         """Красивый вывод результатов"""
         if not results:
             print("\n❌ No diseases found matching the patient's test results.")
             return
-        
+
         print("\n" + "=" * 80)
         print(f"🔍 FOUND {len(results)} POTENTIAL DISEASES")
         print("=" * 80)
-        
+
         for i, result in enumerate(results, 1):
             print(f"\n{'─' * 80}")
             print(f"#{i}. {result.canonical_name} (ID: {result.disease_id})")
@@ -766,64 +719,64 @@ class MedicalLabAnalyzer:
             print(f"  ✅ Matched Patterns:  {result.matched_patterns} / {result.total_patterns}")
             print(f"  ⚠️  Contradictions:    {len(result.contradictions)}")
             print(f"  ❓ Missing Data:      {len(result.missing_data)}")
-            
+
             if detailed:
                 if result.matched_details:
                     print("\n  ✅ Matched Patterns:")
                     for match in result.matched_details:
                         print(f"     • {match['test_name']}: {match['status']} "
                               f"(IDF: {match['idf_weight']:.4f}, Category: {match['category']})")
-                
+
                 if result.contradictions:
                     print("\n  ⚠️  Contradictions:")
                     for contra in result.contradictions:
                         print(f"     • {contra['test_name']}: expected {contra['expected']}, "
                               f"got {contra['actual']} (Penalty: {contra['penalty']:.4f})")
-                
+
                 if result.missing_data and len(result.missing_data) <= 5:
                     print("\n  ❓ Missing Tests (top 5):")
                     for missing in result.missing_data[:5]:
                         print(f"     • {missing['test_name']}: {missing['expected_status']} "
                               f"(IDF: {missing['idf_weight']:.4f})")
-        
+
         print("\n" + "=" * 80)
-    
+
     # ============================================================
     # MongoDB Integration Methods
     # ============================================================
-    
+
     def load_references_from_mongodb(self, db_name: str = "medical_lab"):
         """
         Загрузка референсных диапазонов из MongoDB
-        
+
         Args:
             db_name: Имя базы данных
         """
         if not self.mongodb_client:
             raise ValueError("MongoDB client not provided. Initialize with mongodb_client parameter.")
-        
+
         print("=" * 60)
         print("Loading reference ranges from MongoDB...")
         print("=" * 60)
-        
+
         db = self.mongodb_client[db_name]
         collection = db.reference_ranges
-        
+
         # Получаем все документы
         documents = list(collection.find({}))
-        
+
         if not documents:
             print("⚠️  No reference ranges found in MongoDB")
             return
-        
+
         # Преобразуем в формат для ReferenceRangeManager
         for doc in documents:
             category = doc['test_category']
             test_name = doc['test_name']
-            
+
             if category not in self.reference_manager.references:
                 self.reference_manager.references[category] = {}
-            
+
             # Сохраняем данные теста
             test_data = {
                 'test_name': test_name,
@@ -833,36 +786,36 @@ class MedicalLabAnalyzer:
                 'status_ranges': doc.get('status_ranges'),
                 'deviation_thresholds': doc.get('deviation_thresholds')
             }
-            
+
             self.reference_manager.references[category][test_name] = test_data
-            
+
             # Индексируем имена
             norm_name = self.reference_manager._normalize(test_name)
             self.reference_manager.name_index[norm_name] = (category, test_name)
-            
+
             for alt_name in test_data['alt_names']:
                 norm_alt = self.reference_manager._normalize(alt_name)
                 self.reference_manager.name_index[norm_alt] = (category, test_name)
-        
+
         total_tests = sum(len(tests) for tests in self.reference_manager.references.values())
         print(f"✓ Loaded {total_tests} reference ranges")
         print(f"✓ Built name index with {len(self.reference_manager.name_index)} entries")
         print("=" * 60)
-    
+
     def load_diseases_from_mongodb(self, db_name: str = "medical_lab"):
         """
         Загрузка заболеваний из MongoDB
-        
+
         Args:
             db_name: Имя базы данных
         """
         if not self.mongodb_client:
             raise ValueError("MongoDB client not provided. Initialize with mongodb_client parameter.")
-        
+
         print("=" * 60)
         print("Loading disease database from MongoDB...")
         print("=" * 60)
-        
+
         db = self.mongodb_client[db_name]
         collection = db.diseases
         weights_collection = db.lab_pattern_idf_weights
@@ -871,17 +824,17 @@ class MedicalLabAnalyzer:
 
         print(f'? Loaded {len(pattern_weight_docs)} pattern weight entries')
 
-        
+
         # Получаем все документы
         documents = list(collection.find({}))
-        
+
         if not documents:
             print("⚠️  No diseases found in MongoDB")
             return
-        
+
         # Инициализируем поисковый движок
         self.search_engine = DiseaseSearchEngine(self.reference_manager)
-        
+
         # Загружаем заболевания
         for doc in documents:
             disease = Disease(
@@ -889,7 +842,7 @@ class MedicalLabAnalyzer:
                 canonical_name=doc['canonical_name'],
                 patterns=[]
             )
-            
+
             # Загружаем паттерны
             max_idf_weight = 0.0
             for pattern_data in doc.get('patterns', []):
@@ -906,17 +859,17 @@ class MedicalLabAnalyzer:
                 pattern.idf_weight = weight_doc.get('idf_weight', 1.0) if weight_doc else 1.0
                 max_idf_weight += pattern.idf_weight
                 disease.patterns.append(pattern)
-            
+
             # Устанавливаем максимальный скор
             disease.max_idf_score = round(max_idf_weight, 6)
-            
+
             # Сохраняем и индексируем
             self.search_engine.diseases[disease.disease_id] = disease
             self.search_engine._index_disease(disease)
-        
+
         print(f"✓ Loaded {len(self.search_engine.diseases)} diseases")
         print(f"✓ Built inverted index with {len(self.search_engine.pattern_index)} patterns")
-        
+
         # Показываем метаданные IDF
         metadata = db.metadata.find_one({"data_type": "idf_weights"})
         if metadata:
@@ -924,32 +877,32 @@ class MedicalLabAnalyzer:
             print(f"  • Total diseases: {metadata['total_diseases']}")
             print(f"  • Unique patterns: {metadata['total_patterns']}")
             print(f"  • Avg IDF weight: {metadata['avg_idf_weight']:.4f}")
-        
+
         print("=" * 60)
-    
+
     def load_all_from_mongodb(self, db_name: str = "medical_lab"):
         """
         Загрузка всех данных из MongoDB
-        
+
         Args:
             db_name: Имя базы данных
         """
         self.load_references_from_mongodb(db_name)
         self.load_diseases_from_mongodb(db_name)
-    
+
     def get_mongodb_version(self, db_name: str = "medical_lab") -> dict:
         """
         Получение версии данных в MongoDB
-        
+
         Returns:
             dict с информацией о версии
         """
         if not self.mongodb_client:
             raise ValueError("MongoDB client not provided")
-        
+
         db = self.mongodb_client[db_name]
         metadata = db.metadata.find_one({"data_type": "idf_weights"})
-        
+
         if metadata:
             return {
                 "version": metadata['version'],
@@ -957,5 +910,5 @@ class MedicalLabAnalyzer:
                 "total_diseases": metadata['total_diseases'],
                 "total_patterns": metadata['total_patterns']
             }
-        
+
         return None
