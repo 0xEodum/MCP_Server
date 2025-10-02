@@ -89,7 +89,7 @@ def analyze_documents(json_files: List[Path]) -> Dict[str, Any]:
             total_content_sections += doc_content_sections
 
         except Exception as e:
-            print(f"вќЊ РћС€РёР±РєР° РІ {file_path.name}: {e}")
+            print(f"❌ Ошибка в {file_path.name}: {e}")
             continue
 
     print(f"\nСводка:")
@@ -121,7 +121,7 @@ def main():
                         help='Пересоздать коллекции (удалит существующие данные)')
     parser.add_argument('--qdrant-url', default='http://localhost:6333',
                         help='URL Qdrant сервера')
-    parser.add_argument('--model', default='intfloat/multilingual-e5-large',
+    parser.add_argument('--model', default='intfloat/multilingual-e5-small',
                         help='Название модели для эмбеддингов')
     parser.add_argument('--dry-run', action='store_true',
                         help='Только анализ без индексации')
