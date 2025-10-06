@@ -65,7 +65,6 @@ _sync_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def _run_sync_manager_in_thread(sync_manager: SyncManager):
-
     global _sync_loop
 
     loop = asyncio.new_event_loop()
@@ -75,7 +74,7 @@ def _run_sync_manager_in_thread(sync_manager: SyncManager):
     try:
         loop.run_until_complete(sync_manager.start())
     except Exception as e:
-        print(f"вќЊ Sync manager error: {e}")
+        print(f"❌ Sync manager error: {e}")
     finally:
         loop.close()
 
@@ -96,14 +95,14 @@ def _ensure_lab_analyzer() -> MedicalLabAnalyzer:
         if _mongodb_client is None:
             _mongodb_client = MongoClient(MONGODB_URI)
             _mongodb_client.admin.command('ping')
-            print("вњ“ Connected to MongoDB for lab analysis")
+            print("✓ Connected to MongoDB for lab analysis")
 
         _lab_analyzer = MedicalLabAnalyzer(mongodb_client=_mongodb_client)
         _lab_analyzer.load_all_from_mongodb()
-        print(f"вњ“ Lab analyzer initialized with MongoDB (db: {MONGODB_DB})")
+        print(f"✓ Lab analyzer initialized with MongoDB (db: {MONGODB_DB})")
 
         if _sync_manager is None and _sync_thread is None:
-            print(f"рџ”„ Starting background sync (interval: {SYNC_INTERVAL}s)...")
+            print(f"🔄 Starting background sync (interval: {SYNC_INTERVAL}s)...")
 
             _sync_manager = SyncManager(
                 analyzer=_lab_analyzer,
@@ -119,7 +118,7 @@ def _ensure_lab_analyzer() -> MedicalLabAnalyzer:
                 name="SyncManagerThread"
             )
             _sync_thread.start()
-            print("вњ“ Background sync thread started")
+            print("✓ Background sync thread started")
 
     return _lab_analyzer
 
@@ -147,7 +146,6 @@ async def t_analyze_lab_tests(
         top_k: int = 10,
         categories: Optional[List[str]] = None
 ) -> Dict[str, Any]:
-
     analyzer = _ensure_lab_analyzer()
 
     try:
@@ -162,25 +160,8 @@ async def t_analyze_lab_tests(
 
         processing_time = (time.time() - start_time) * 1000
 
-        filtered_results = [r for r in results if getattr(r, "total_score", 0) >= 0]
         disease_results = []
-        search_engine = getattr(analyzer, "search_engine", None)
-
-        for r in filtered_results:
-            expected_patterns = []
-            if search_engine and getattr(search_engine, "diseases", None):
-                disease = search_engine.diseases.get(r.disease_id)
-                if disease:
-                    expected_patterns = [
-                        {
-                            "test_name": pattern.test_name,
-                            "expected_status": pattern.expected_status,
-                            "category": pattern.category,
-                            "idf_weight": pattern.idf_weight,
-                        }
-                        for pattern in disease.patterns
-                    ]
-
+        for r in results:
             disease_results.append({
                 "disease_id": r.disease_id,
                 "canonical_name": r.canonical_name,
@@ -194,7 +175,8 @@ async def t_analyze_lab_tests(
                 "matched_details": r.matched_details,
                 "contradictions": r.contradictions,
                 "missing_data": r.missing_data,
-                "expected_patterns": expected_patterns
+                "redundant_data": r.redundant_data,  # NEW: добавлено в v2.0
+                "expected_patterns": r.expected_patterns  # NEW: добавлено в v2.0
             })
 
         return {
@@ -202,7 +184,8 @@ async def t_analyze_lab_tests(
             "processing_time_ms": processing_time,
             "results": disease_results,
             "total_found": len(disease_results),
-            "tool": "analyze_lab_tests"
+            "tool": "analyze_lab_tests",
+            "engine_version": "2.0"  # NEW: версия движка
         }
 
     except Exception as e:
@@ -213,234 +196,42 @@ async def t_analyze_lab_tests(
         }
 
 
-
-
-async def t_check_lab_test_statuses(
+async def t_explain_lab_tests(
         *,
-        tests: List[Dict[str, Any]],
+        tests: List[Dict[str, str]],
         gender: str = "unisex"
 ) -> Dict[str, Any]:
-
+    """
+    NEW TOOL: Объяснение статуса каждого теста с референсными значениями
+    """
     analyzer = _ensure_lab_analyzer()
-    reference_manager = analyzer.reference_manager
-
-    def _to_float(value: Any) -> Optional[float]:
-        if value is None:
-            return None
-        if isinstance(value, (int, float)):
-            return float(value)
-        value_str = str(value).strip().replace(",", ".")
-        if not value_str:
-            return None
-        try:
-            return float(value_str)
-        except ValueError:
-            return None
-
-    def _format_number(value: Optional[float]) -> Optional[str]:
-        if value is None:
-            return None
-        formatted = f"{value:.4f}".rstrip("0").rstrip(".")
-        return formatted if formatted else "0"
-
-    def _format_value(value: Optional[float], units: Optional[str]) -> Optional[str]:
-        number = _format_number(value)
-        if number is None:
-            return None
-        units_str = (units or "").strip()
-        return f"{number} {units_str}".strip() if units_str else number
-
-    def _extract_normal_range(test_data: Dict[str, Any]) -> Dict[str, Optional[float]]:
-        normal_range = test_data.get("normal_range")
-        candidate = None
-
-        if isinstance(normal_range, dict):
-            if gender in normal_range:
-                candidate = normal_range[gender]
-            elif "unisex" in normal_range:
-                candidate = normal_range["unisex"]
-            elif "min" in normal_range and "max" in normal_range:
-                candidate = normal_range
-            else:
-                for value in normal_range.values():
-                    if isinstance(value, dict):
-                        candidate = value
-                        break
-
-        if candidate is None:
-            status_ranges = test_data.get("status_ranges", {})
-            potential = None
-
-            if isinstance(status_ranges, dict):
-                if gender in status_ranges:
-                    potential = status_ranges[gender]
-                elif "unisex" in status_ranges:
-                    potential = status_ranges["unisex"]
-                elif status_ranges:
-                    potential = next((v for v in status_ranges.values() if isinstance(v, dict)), None)
-
-                if isinstance(potential, dict):
-                    normal_candidate = potential.get("normal")
-                    if isinstance(normal_candidate, dict):
-                        candidate = normal_candidate
-
-        if isinstance(candidate, dict):
-            return {
-                "min": _to_float(candidate.get("min")),
-                "max": _to_float(candidate.get("max"))
-            }
-
-        return {"min": None, "max": None}
-
-    def _build_explanation(
-            test_label: str,
-            status_value: str,
-            converted_value: Optional[float],
-            units: Optional[str],
-            normal_range: Dict[str, Optional[float]]
-    ) -> str:
-        value_repr = _format_value(converted_value, units)
-        lower_repr = _format_value(normal_range.get("min"), units)
-        upper_repr = _format_value(normal_range.get("max"), units)
-
-        if converted_value is None:
-            return f"Value for {test_label} could not be evaluated."
-
-        if status_value == "normal":
-            if lower_repr and upper_repr:
-                return f"Value {value_repr} is within the normal range {lower_repr} - {upper_repr}."
-            if lower_repr or upper_repr:
-                range_repr = lower_repr or upper_repr
-                return f"Value {value_repr} is within the expected range around {range_repr}."
-            return f"Value {value_repr} is within the expected range."
-
-        if status_value in {"below_normal", "critically_low"}:
-            if lower_repr:
-                explanation = f"Value {value_repr} is below the lower limit {lower_repr}."
-            else:
-                explanation = f"Value {value_repr} is below the expected range."
-            if status_value == "critically_low":
-                explanation += " Critical deviation detected."
-            return explanation
-
-        if status_value in {"above_normal", "critically_high"}:
-            if upper_repr:
-                explanation = f"Value {value_repr} is above the upper limit {upper_repr}."
-            else:
-                explanation = f"Value {value_repr} is above the expected range."
-            if status_value == "critically_high":
-                explanation += " Critical deviation detected."
-            return explanation
-
-        if status_value == "unknown":
-            if not lower_repr and not upper_repr:
-                return f"Reference range for {test_label} is not available."
-            return f"Status for {test_label} could not be determined."
-
-        return f"Status for {test_label} is {status_value}."
 
     try:
-        items: List[Dict[str, Any]] = []
+        start_time = time.time()
 
-        for test in tests:
-            name = str(test.get("name") or test.get("test_name") or "").strip()
-            if not name:
-                continue
+        explanations = analyzer.explain_tests(
+            tests=tests,
+            gender=gender
+        )
 
-            raw_value = test.get("value")
-            numeric_value = _to_float(raw_value)
-            user_units = str(test.get("units") or "").strip()
-
-            reference_record = reference_manager.find_test(name)
-            canonical_name = name
-            reference_units = ""
-            normal_range = {"min": None, "max": None}
-            status_value = "unknown"
-            explanation = ""
-            converted_value = numeric_value
-
-            if reference_record:
-                _, test_data = reference_record
-                canonical_name = test_data.get("test_name", canonical_name)
-                reference_units = str(test_data.get("units") or "").strip()
-                normal_range = _extract_normal_range(test_data)
-
-                if numeric_value is not None:
-                    converted_value = reference_manager.unit_converter.convert(
-                        numeric_value,
-                        user_units,
-                        reference_units
-                    )
-                    status_value = reference_manager.calculate_status(
-                        name,
-                        numeric_value,
-                        gender=gender,
-                        units=user_units or None
-                    )
-                    explanation = _build_explanation(
-                        canonical_name,
-                        status_value,
-                        converted_value,
-                        reference_units or user_units,
-                        normal_range
-                    )
-                else:
-                    if raw_value not in (None, ""):
-                        explanation = f"Value '{raw_value}' for {canonical_name} could not be parsed as a number."
-                    else:
-                        explanation = f"Value for {canonical_name} is missing."
-            else:
-                if numeric_value is not None:
-                    explanation = f"Reference data for {canonical_name} not found."
-                else:
-                    if raw_value not in (None, ""):
-                        explanation = f"Reference data for {canonical_name} not found and value '{raw_value}' could not be evaluated."
-                    else:
-                        explanation = f"Reference data for {canonical_name} not found."
-
-            reference_units = reference_units or user_units
-            reference_value_payload = {
-                "value": None,
-                "units": reference_units
-            }
-            if any(v is not None for v in normal_range.values()):
-                reference_value_payload["value"] = {
-                    "min": normal_range["min"],
-                    "max": normal_range["max"]
-                }
-
-            items.append({
-                "test_name": {
-                    "value": canonical_name,
-                    "units": reference_units
-                },
-                "user_value": {
-                    "value": numeric_value,
-                    "units": user_units or reference_units
-                },
-                "reference_value": reference_value_payload,
-                "status": {
-                    "value": status_value,
-                    "explanation": explanation
-                }
-            })
-
-        data_source = "mongodb" if analyzer.mongodb_client else "local_cache"
+        processing_time = (time.time() - start_time) * 1000
 
         return {
             "success": True,
-            "data_source": data_source,
-            "total": len(items),
-            "items": items,
-            "tool": "check_lab_test_statuses"
+            "processing_time_ms": processing_time,
+            "explanations": explanations,
+            "total_tests": len(explanations),
+            "tool": "explain_lab_tests"
         }
 
     except Exception as e:
         return {
             "success": False,
             "error": str(e),
-            "tool": "check_lab_test_statuses"
+            "tool": "explain_lab_tests"
         }
+
+
 async def t_medical_normalize_query(
         *,
         query: str,
@@ -531,7 +322,6 @@ async def t_medical_get_sections(
 
 
 async def t_get_sync_status() -> Dict[str, Any]:
-
     global _sync_manager
 
     if _sync_manager is None:
@@ -573,7 +363,6 @@ async def t_force_sync() -> Dict[str, Any]:
             "success": False,
             "error": str(e)
         }
-
 
 
 def _register_fast() -> None:
@@ -725,10 +514,18 @@ def _register_fast() -> None:
             categories: Optional[List[str]] = None
     ) -> dict:
         """
-        Анализ лабораторных тестов для определения возможных заболеваний
+        Анализ лабораторных тестов для определения возможных заболеваний (Engine v2.0)
 
-        Анализирует результаты лабораторных анализов и возвращает список возможных заболеваний
-        с оценкой вероятности на основе паттернов отклонений.
+        Анализирует результаты лабораторных анализов с использованием улучшенной системы
+        непрерывного скоринга и возвращает список возможных заболеваний с детальной оценкой.
+
+        ✨ НОВОЕ В ВЕРСИИ 2.0:
+        - Непрерывная система скоринга вместо дискретной
+        - Колоколообразные функции для умеренных отклонений (above/below_normal)
+        - Экспоненциальное насыщение для критических значений
+        - Улучшенная обработка противоречий и неожиданных отклонений
+        - Детальная информация о redundant_data (нормальные значения вне паттерна)
+        - Полный список expected_patterns для каждой болезни
 
         КОГДА ИСПОЛЬЗОВАТЬ:
         - У пациента есть результаты лабораторных анализов
@@ -747,19 +544,21 @@ def _register_fast() -> None:
         ВОЗВРАЩАЕТ:
         - success: успешность анализа
         - processing_time_ms: время обработки в миллисекундах
+        - engine_version: версия движка ("2.0")
         - results: список найденных заболеваний с оценками:
             * disease_id: идентификатор заболевания
             * canonical_name: официальное название заболевания
             * matched_patterns: количество совпавших паттернов
             * total_patterns: общее количество паттернов для заболевания
-            * matched_score: балл за совпадения
+            * matched_score: балл за совпадения (с учетом непрерывного скоринга)
             * contradiction_penalty: штраф за противоречия
             * total_score: итоговый балл
             * normalized_score: нормализованный балл (0-1)
-            * matched_details: детали совпадений
-            * contradictions: список противоречий
-            * expected_patterns: expected pattern definitions for the disease
+            * matched_details: детали совпадений с contribution и gain
+            * contradictions: список противоречий с reason и dist
             * missing_data: недостающие данные
+            * redundant_data: нормальные значения вне паттерна (NEW в v2.0)
+            * expected_patterns: полный список ожидаемых паттернов (NEW в v2.0)
         - total_found: общее количество найденных заболеваний
 
         ПРИМЕР ИСПОЛЬЗОВАНИЯ:
@@ -778,17 +577,87 @@ def _register_fast() -> None:
         )
 
     @mcp.tool()
-    async def check_lab_test_statuses(
+    async def explain_lab_tests(
             tests: List[Dict[str, str]],
-            gender: str = "unisex",
+            gender: str = "unisex"
     ) -> dict:
         """
-        Quick status check for laboratory tests without disease matching.
+        🆕 Объяснение статуса каждого лабораторного теста (NEW TOOL в v2.0)
+
+        Для каждого теста возвращает:
+        - Каноническое название теста
+        - Значение пациента (с конвертацией единиц)
+        - Референсный диапазон для данного пола
+        - Статус теста (normal, below_normal, above_normal, critically_low, critically_high)
+
+        Это полезно для:
+        - Понимания, какие тесты отклонились от нормы
+        - Проверки конвертации единиц измерения
+        - Валидации входных данных перед анализом
+        - Объяснения пациенту статуса каждого теста
+
+        ПАРАМЕТРЫ:
+        - tests: список тестов [{"name": "...", "value": "...", "units": "..."}]
+        - gender: пол пациента ("male", "female", "unisex")
+
+        ВОЗВРАЩАЕТ:
+        - success: успешность обработки
+        - processing_time_ms: время обработки
+        - explanations: список объяснений для каждого теста:
+            * test_name: каноническое название и единицы
+            * user_value: значение пациента (конвертированное)
+            * reference_value: референсный диапазон (min, max)
+            * status: статус теста
+
+        ПРИМЕР:
+        tests = [{"name": "Гемоглобин", "value": "14.5", "units": "г/дл"}]
+        explain_lab_tests(tests=tests, gender="male")
+
+        Результат:
+        {
+          "test_name": {"value": "Гемоглобин", "units": "г/л"},
+          "user_value": {"value": 145.0, "units": "г/л"},
+          "reference_value": {"value": {"min": 130, "max": 170}, "units": "г/л"},
+          "status": {"value": "normal"}
+        }
         """
-        return await t_check_lab_test_statuses(
+        return await t_explain_lab_tests(
             tests=tests,
             gender=gender
         )
+
+    @mcp.tool()
+    async def get_sync_status() -> dict:
+        """
+        Проверка статуса синхронизации данных с MongoDB
+
+        Показывает:
+        - Включена ли синхронизация
+        - Текущая версия данных в памяти
+        - Версия данных в MongoDB
+        - Синхронизированы ли данные
+        - Время последней проверки
+        - Интервал проверки
+        """
+        return await t_get_sync_status()
+
+    @mcp.tool()
+    async def force_sync() -> dict:
+        """
+        Принудительная синхронизация данных из MongoDB
+
+        Используй если:
+        - Данные в MongoDB были обновлены
+        - Нужно гарантировать актуальность данных
+        - Возникли проблемы с автоматической синхронизацией
+
+        Возвращает:
+        - success: успешность синхронизации
+        - version: новая версия данных
+        - sync_time_ms: время синхронизации
+        - timestamp: время выполнения
+        """
+        return await t_force_sync()
 
     mcp.run(transport="streamable-http")
 
@@ -801,7 +670,7 @@ def _register_base() -> None:
 
 
 if __name__ == "__main__":
-    print("=== Medical RAG MCP Server ===")
+    print("=== Medical RAG MCP Server v2.0 ===")
     print("Collections:")
     print(f"  - {DISEASE_REGISTRY} (disease registry)")
     print(f"  - {DISEASE_OVERVIEW} (disease overview)")
@@ -811,9 +680,11 @@ if __name__ == "__main__":
     print(f"  - MongoDB URI: {MONGODB_URI}")
     print(f"  - Database: {MONGODB_DB}")
     print(f"  - Sync interval: {SYNC_INTERVAL}s")
+    print(f"  - Engine version: 2.0 (continuous scoring)")
     print()
     print(f"Using model: {DEFAULT_MODEL}")
-   
+    print(f"Vector size: Expected ~1024 (E5-Large)")
+    print()
 
     if MCP_MODE == "fast":
         print("Starting with FastMCP...")
