@@ -534,8 +534,8 @@ def _register_fast() -> None:
             * matched_details: детали совпадений с contribution и gain
             * contradictions: список противоречий с reason и dist
             * missing_data: недостающие данные
-            * redundant_data: нормальные значения вне паттерна (NEW в v2.0)
-            * expected_patterns: полный список ожидаемых паттернов (NEW в v2.0)
+            * redundant_data: нормальные значения вне паттерна
+            * expected_patterns: полный список ожидаемых паттернов
         - total_found: общее количество найденных заболеваний
         """
         return await t_analyze_lab_tests(

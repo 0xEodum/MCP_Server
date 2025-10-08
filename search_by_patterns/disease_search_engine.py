@@ -13,121 +13,7 @@ from pathlib import Path
 import re
 
 from search_by_patterns.models import *
-
-
-class UnitConverter:
-    """Converts numeric values between compatible laboratory units."""
-
-    _UNIT_ALIASES = {
-        '': '',
-        '%': 'percent',
-        'percent': 'percent',
-        'g/l': 'g_per_l',
-        'g/dl': 'g_per_dl',
-        'mg/l': 'mg_per_l',
-        'mg/dl': 'mg_per_dl',
-        'mmol/l': 'mmol_per_l',
-        'umol/l': 'umol_per_l',
-        'µmol/l': 'umol_per_l',
-        'mol/l': 'mol_per_l',
-        '10^12/l': '1e12_per_l',
-        'x10^12/l': '1e12_per_l',
-        '10^6/ul': '1e12_per_l',
-        'x10^6/ul': '1e12_per_l',
-        '10^6/µl': '1e12_per_l',
-        'x10^6/µl': '1e12_per_l',
-        '10^9/l': '1e9_per_l',
-        'x10^9/l': '1e9_per_l',
-        '10^3/ul': '1e9_per_l',
-        'x10^3/ul': '1e9_per_l',
-        '10^3/µl': '1e9_per_l',
-        'x10^3/µl': '1e9_per_l',
-        'unit': 'unit',
-        'units': 'unit',
-        'pg': 'pg',
-        'fl': 'fl',
-        'mm/h': 'mm_per_hr',
-        'mm/hr': 'mm_per_hr',
-    }
-
-    _CONVERSION_TABLE = {
-        ('g_per_l', 'g_per_dl'): 0.1,
-        ('g_per_dl', 'g_per_l'): 10.0,
-        ('mg_per_l', 'mg_per_dl'): 0.1,
-        ('mg_per_dl', 'mg_per_l'): 10.0,
-        ('g_per_l', 'mg_per_dl'): 100.0,
-        ('mg_per_dl', 'g_per_l'): 0.01,
-        ('mmol_per_l', 'umol_per_l'): 1000.0,
-        ('umol_per_l', 'mmol_per_l'): 0.001,
-        ('1e12_per_l', '1e12_per_l'): 1.0,
-        ('1e9_per_l', '1e9_per_l'): 1.0,
-        ('percent', 'percent'): 1.0,
-        ('unit', 'unit'): 1.0,
-        ('pg', 'pg'): 1.0,
-        ('fl', 'fl'): 1.0,
-        ('mm_per_hr', 'mm_per_hr'): 1.0,
-    }
-
-    _REPLACEMENTS = [
-        ('×', 'x'),
-        ('х', 'x'),
-        ('−', '-'),
-        ('–', '-'),
-        ('µl', 'ul'),
-        ('μl', 'ul'),
-        ('µ', 'u'),
-        ('μ', 'u'),
-        ('мкмоль', 'umol'),
-        ('ммоль', 'mmol'),
-        ('моль', 'mol'),
-        ('мкл', 'ul'),
-        ('мл', 'ml'),
-        ('мк', 'u'),
-        ('мм', 'mm'),
-        ('мг', 'mg'),
-        ('г', 'g'),
-        ('дл', 'dl'),
-        ('л', 'l'),
-        ('ед.', 'unit'),
-        ('ед', 'unit'),
-        ('ч', 'h'),
-        ('пг', 'pg'),
-        ('фл', 'fl'),
-        (',', '.'),
-    ]
-
-    def normalize_unit(self, unit: Optional[str]) -> str:
-        if not unit:
-            return ''
-
-        normalized = unit.strip().lower()
-        if not normalized:
-            return ''
-
-        for src, dst in self._REPLACEMENTS:
-            normalized = normalized.replace(src, dst)
-
-        normalized = normalized.replace(' ', '')
-
-        return self._UNIT_ALIASES.get(normalized, normalized)
-
-    def convert(self, value: float, from_unit: Optional[str], to_unit: Optional[str]) -> float:
-        from_key = self.normalize_unit(from_unit)
-        to_key = self.normalize_unit(to_unit)
-
-        if not from_key or not to_key or from_key == to_key:
-            return value
-
-        factor = self._CONVERSION_TABLE.get((from_key, to_key))
-        if factor is not None:
-            return value * factor
-
-        inverse = self._CONVERSION_TABLE.get((to_key, from_key))
-        if inverse is not None and inverse != 0:
-            return value / inverse
-
-        return value
-
+from search_by_patterns.unit_converter import UnitConverter
 
 class ReferenceRangeManager:
     """Управление референсными диапазонами"""
@@ -907,13 +793,13 @@ class DiseaseSearchEngine:
             self.category_index[pattern.category].add(disease.disease_id)
 
     def search(
-        self,
-        patient_tests: List[TestResult],
-        top_k: int = 10,
-        gender: str = 'unisex',
-        categories: Optional[List[str]] = None,
-        min_matched_patterns: int = 1,
-        apply_contradiction_penalty: bool = True
+            self,
+            patient_tests: List[TestResult],
+            top_k: int = 10,
+            gender: str = 'unisex',
+            categories: Optional[List[str]] = None,
+            min_matched_patterns: int = 1,
+            apply_contradiction_penalty: bool = True
     ) -> List[SearchResult]:
         """
         Поиск заболеваний по результатам анализов пациента с улучшенным непрерывным скорингом
@@ -953,13 +839,23 @@ class DiseaseSearchEngine:
                 canonical_name = test.name
                 test_data = {}
 
+            # ВАЖНО: Конвертируем значение в референсные единицы
+            # для корректного вычисления contribution
+            target_units = test_data.get('units') if test_data else test.units
+            converted_value = self.reference_manager.unit_converter.convert(
+                test.value,
+                test.units,
+                target_units
+            )
+
             normalized_name = self._normalize(canonical_name)
             patient_patterns[normalized_name] = {
                 'status': status,
                 'category': category,
                 'canonical_name': canonical_name,
                 'normalized_name': normalized_name,
-                'value': test.value,
+                'value': test.value,  # Исходное значение (для логов)
+                'converted_value': converted_value,  # Сконвертированное значение (для расчётов!)
                 'units': test.units,
                 'original_name': test.name,
                 'test_data': test_data  # Сохраняем для distance_contribution
@@ -1006,7 +902,7 @@ class DiseaseSearchEngine:
                     gain = continuous_contribution(
                         idf_weight,
                         mult,
-                        patient_info['value'],
+                        patient_info['converted_value'],  # Используем сконвертированное значение!
                         status,
                         test_data,
                         gender
@@ -1014,7 +910,7 @@ class DiseaseSearchEngine:
 
                     # Вычисляем вклад для детализации
                     contrib = distance_contribution(
-                        patient_info['value'],
+                        patient_info['converted_value'],  # Используем сконвертированное значение!
                         status,
                         test_data,
                         gender
@@ -1096,7 +992,7 @@ class DiseaseSearchEngine:
                         pen = continuous_penalty(
                             pattern.idf_weight,
                             penalty_multiplier,
-                            patient_info['value'],
+                            patient_info['converted_value'],  # Используем сконвертированное значение!
                             patient_status,
                             test_data,
                             gender
@@ -1106,9 +1002,9 @@ class DiseaseSearchEngine:
                         # Вычисляем dist для отображения
                         dist, _ = self.reference_manager.distance_from_normal(
                             canonical_name,
-                            patient_info['value'],
+                            patient_info['converted_value'],  # Используем сконвертированное значение!
                             gender,
-                            patient_info['units']
+                            test_data.get('units')  # Используем референсные единицы
                         )
 
                         disease_scores[disease_id]['contradictions'].append({
@@ -1153,6 +1049,7 @@ class DiseaseSearchEngine:
                 actual_status = patient_info['status']
                 canonical_name = patient_info['canonical_name']
                 user_value = patient_info['value']
+                converted_value = patient_info['converted_value']
                 units = patient_info['units'] if patient_info['units'] else ''
                 category = patient_info['category']
 
@@ -1170,9 +1067,9 @@ class DiseaseSearchEngine:
                 # Вычисляем непрерывную дистанцию (для отображения)
                 dist, _ = self.reference_manager.distance_from_normal(
                     canonical_name,
-                    user_value,
+                    converted_value,  # Используем сконвертированное значение!
                     gender,
-                    units
+                    test_data.get('units')  # Используем референсные единицы
                 )
 
                 # Пытаемся взять IDF из registry
@@ -1191,7 +1088,7 @@ class DiseaseSearchEngine:
                 pen = continuous_penalty(
                     idf_for_unexpected,
                     mult,
-                    user_value,
+                    converted_value,  # Используем сконвертированное значение!
                     actual_status,
                     test_data,
                     gender
