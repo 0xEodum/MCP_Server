@@ -175,8 +175,8 @@ async def t_analyze_lab_tests(
                 "matched_details": r.matched_details,
                 "contradictions": r.contradictions,
                 "missing_data": r.missing_data,
-                "redundant_data": r.redundant_data,  # NEW: добавлено в v2.0
-                "expected_patterns": r.expected_patterns  # NEW: добавлено в v2.0
+                "redundant_data": r.redundant_data,
+                "expected_patterns": r.expected_patterns
             })
 
         return {
@@ -185,7 +185,6 @@ async def t_analyze_lab_tests(
             "results": disease_results,
             "total_found": len(disease_results),
             "tool": "analyze_lab_tests",
-            "engine_version": "2.0"  # NEW: версия движка
         }
 
     except Exception as e:
@@ -201,9 +200,6 @@ async def t_explain_lab_tests(
         tests: List[Dict[str, str]],
         gender: str = "unisex"
 ) -> Dict[str, Any]:
-    """
-    NEW TOOL: Объяснение статуса каждого теста с референсными значениями
-    """
     analyzer = _ensure_lab_analyzer()
 
     try:
@@ -320,49 +316,6 @@ async def t_medical_get_sections(
             "disease_id": disease_id
         }
 
-
-async def t_get_sync_status() -> Dict[str, Any]:
-    global _sync_manager
-
-    if _sync_manager is None:
-        return {
-            "enabled": False,
-            "message": "Sync manager not initialized"
-        }
-
-    try:
-        status = _sync_manager.get_status()
-        return {
-            "enabled": True,
-            "status": status
-        }
-    except Exception as e:
-        return {
-            "enabled": True,
-            "error": str(e)
-        }
-
-
-async def t_force_sync() -> Dict[str, Any]:
-    global _sync_manager
-
-    if _sync_manager is None:
-        return {
-            "success": False,
-            "error": "Sync manager not initialized"
-        }
-
-    try:
-        result = _sync_manager.force_sync()
-        return {
-            "success": True,
-            **result
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
 
 
 def _register_fast() -> None:
@@ -514,18 +467,10 @@ def _register_fast() -> None:
             categories: Optional[List[str]] = None
     ) -> dict:
         """
-        Анализ лабораторных тестов для определения возможных заболеваний (Engine v2.0)
+        Анализ лабораторных тестов для определения возможных заболеваний
 
         Анализирует результаты лабораторных анализов с использованием улучшенной системы
         непрерывного скоринга и возвращает список возможных заболеваний с детальной оценкой.
-
-        ✨ НОВОЕ В ВЕРСИИ 2.0:
-        - Непрерывная система скоринга вместо дискретной
-        - Колоколообразные функции для умеренных отклонений (above/below_normal)
-        - Экспоненциальное насыщение для критических значений
-        - Улучшенная обработка противоречий и неожиданных отклонений
-        - Детальная информация о redundant_data (нормальные значения вне паттерна)
-        - Полный список expected_patterns для каждой болезни
 
         КОГДА ИСПОЛЬЗОВАТЬ:
         - У пациента есть результаты лабораторных анализов
@@ -544,7 +489,6 @@ def _register_fast() -> None:
         ВОЗВРАЩАЕТ:
         - success: успешность анализа
         - processing_time_ms: время обработки в миллисекундах
-        - engine_version: версия движка ("2.0")
         - results: список найденных заболеваний с оценками:
             * disease_id: идентификатор заболевания
             * canonical_name: официальное название заболевания
@@ -560,14 +504,6 @@ def _register_fast() -> None:
             * redundant_data: нормальные значения вне паттерна (NEW в v2.0)
             * expected_patterns: полный список ожидаемых паттернов (NEW в v2.0)
         - total_found: общее количество найденных заболеваний
-
-        ПРИМЕР ИСПОЛЬЗОВАНИЯ:
-        tests = [
-            {"name": "Гемоглобин", "value": "85", "units": "г/л"},
-            {"name": "Лейкоциты", "value": "12.5", "units": "×10^9/л"},
-            {"name": "СОЭ", "value": "45", "units": "мм/ч"}
-        ]
-        analyze_lab_tests(tests=tests, gender="female", top_k=5)
         """
         return await t_analyze_lab_tests(
             tests=tests,
@@ -582,8 +518,6 @@ def _register_fast() -> None:
             gender: str = "unisex"
     ) -> dict:
         """
-        🆕 Объяснение статуса каждого лабораторного теста (NEW TOOL в v2.0)
-
         Для каждого теста возвращает:
         - Каноническое название теста
         - Значение пациента (с конвертацией единиц)
@@ -609,55 +543,11 @@ def _register_fast() -> None:
             * reference_value: референсный диапазон (min, max)
             * status: статус теста
 
-        ПРИМЕР:
-        tests = [{"name": "Гемоглобин", "value": "14.5", "units": "г/дл"}]
-        explain_lab_tests(tests=tests, gender="male")
-
-        Результат:
-        {
-          "test_name": {"value": "Гемоглобин", "units": "г/л"},
-          "user_value": {"value": 145.0, "units": "г/л"},
-          "reference_value": {"value": {"min": 130, "max": 170}, "units": "г/л"},
-          "status": {"value": "normal"}
-        }
         """
         return await t_explain_lab_tests(
             tests=tests,
             gender=gender
         )
-
-    @mcp.tool()
-    async def get_sync_status() -> dict:
-        """
-        Проверка статуса синхронизации данных с MongoDB
-
-        Показывает:
-        - Включена ли синхронизация
-        - Текущая версия данных в памяти
-        - Версия данных в MongoDB
-        - Синхронизированы ли данные
-        - Время последней проверки
-        - Интервал проверки
-        """
-        return await t_get_sync_status()
-
-    @mcp.tool()
-    async def force_sync() -> dict:
-        """
-        Принудительная синхронизация данных из MongoDB
-
-        Используй если:
-        - Данные в MongoDB были обновлены
-        - Нужно гарантировать актуальность данных
-        - Возникли проблемы с автоматической синхронизацией
-
-        Возвращает:
-        - success: успешность синхронизации
-        - version: новая версия данных
-        - sync_time_ms: время синхронизации
-        - timestamp: время выполнения
-        """
-        return await t_force_sync()
 
     mcp.run(transport="streamable-http")
 
@@ -680,10 +570,8 @@ if __name__ == "__main__":
     print(f"  - MongoDB URI: {MONGODB_URI}")
     print(f"  - Database: {MONGODB_DB}")
     print(f"  - Sync interval: {SYNC_INTERVAL}s")
-    print(f"  - Engine version: 2.0 (continuous scoring)")
     print()
     print(f"Using model: {DEFAULT_MODEL}")
-    print(f"Vector size: Expected ~1024 (E5-Large)")
     print()
 
     if MCP_MODE == "fast":
@@ -693,5 +581,4 @@ if __name__ == "__main__":
         print("Starting with base MCP...")
         _register_base()
     else:
-        print("MCP SDK not found. Install: pip install mcp")
-        print("Then run: python medical_mcp_server.py")
+        print("MCP SDK not found.")
