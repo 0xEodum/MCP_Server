@@ -248,6 +248,39 @@ async def t_medical_normalize_query(
             enable_reranking=enable_reranking,
             rerank_top_k=rerank_top_k
         )
+        raw_results = result.get("found_diseases", [])
+        filtered_results = []
+
+        for candidate in raw_results:
+            score_value = candidate.get("score")
+
+            if score_value is None:
+                continue
+
+            if score_value < 0:
+                continue
+
+            filtered_candidate = {
+                key: value for key, value in candidate.items()
+                if key not in {"rerank_score", "original_score"}
+            }
+            filtered_results.append((filtered_candidate, score_value))
+
+        if filtered_results:
+            max_score = max(score for _, score in filtered_results)
+            normalized_results = []
+
+            for filtered_candidate, raw_score in filtered_results:
+                if max_score > 0:
+                    filtered_candidate["score"] = raw_score / max_score
+                else:
+                    filtered_candidate["score"] = 0.0
+                normalized_results.append(filtered_candidate)
+        else:
+            normalized_results = []
+
+        result["found_diseases"] = normalized_results
+        result["total_found"] = len(normalized_results)
         result["tool"] = "medical_normalize_query"
         result["stage"] = "normalization"
         return result
