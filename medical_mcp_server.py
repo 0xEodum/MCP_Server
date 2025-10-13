@@ -537,6 +537,8 @@ def _register_fast() -> None:
             * redundant_data: нормальные значения вне паттерна
             * expected_patterns: полный список ожидаемых паттернов
         - total_found: общее количество найденных заболеваний
+
+        СТРАТЕГИЯ: ОБЯЗАТЕЛЬНО ПРОИЗВЕДИ ПОИСК используя инструменты medical_get_overview + medical_get_sections ИСПОЛЬЗУЯ ПОЛУЧЕННЫЙ disease_id ЧТОБЫ ОПРЕДЕЛИТЬ СИМПТОМЫ. СПРОСИ У ПОЛЬЗОВАТЕЛЯ ИСПЫТЫВАЕТ ЛИ ОН УКАЗАННЫЕ СИМПТОМЫ
         """
         return await t_analyze_lab_tests(
             tests=tests,

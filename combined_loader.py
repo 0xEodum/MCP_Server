@@ -557,7 +557,7 @@ def main():
     parser.add_argument(
         "reference_file",
         type=Path,
-        help="Path to reference ranges JSON file (e.g., ref_blood.json)"
+        help="Path to reference ranges JSON file (e.g., references.json)"
     )
     
     parser.add_argument(
